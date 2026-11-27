@@ -1,0 +1,12 @@
+[package]
+name = "backstep-core"
+description = "Core library for Backstep: recording format, checksums and (later) the Cortex-M replay engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true

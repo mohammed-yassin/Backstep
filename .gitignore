@@ -1,0 +1,14 @@
+# Build outputs
+/host/target/
+/firmware/build/
+/recorder/build/
+
+# Editors and OS files
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
