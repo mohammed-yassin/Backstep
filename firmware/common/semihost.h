@@ -12,6 +12,9 @@
 
 #include <stdint.h>
 
+#define SEMIHOST_SYS_OPEN 0x01u
+#define SEMIHOST_SYS_CLOSE 0x02u
+#define SEMIHOST_SYS_WRITE 0x05u
 #define SEMIHOST_SYS_GET_CMDLINE 0x15u
 #define SEMIHOST_SYS_EXIT 0x18u
 #define SEMIHOST_ADP_STOPPED_APPLICATION_EXIT 0x20026u
@@ -37,6 +40,32 @@ static inline int semihost_get_cmdline(char *buf, uint32_t size)
     return semihost_call(SEMIHOST_SYS_GET_CMDLINE, (uint32_t)(uintptr_t)block) == 0u
                ? 0
                : -1;
+}
+
+/*
+ * Write len bytes to a new host file (created/truncated, binary), in a
+ * single semihosting call. Returns 0 on success.
+ */
+static inline int semihost_write_file(const char *name, uint32_t name_len,
+                                      const void *data, uint32_t len)
+{
+    volatile uint32_t block[3];
+    uint32_t handle, left;
+
+    block[0] = (uint32_t)(uintptr_t)name;
+    block[1] = 5u; /* mode "wb" */
+    block[2] = name_len;
+    handle = semihost_call(SEMIHOST_SYS_OPEN, (uint32_t)(uintptr_t)block);
+    if (handle == 0xFFFFFFFFu) {
+        return -1;
+    }
+    block[0] = handle;
+    block[1] = (uint32_t)(uintptr_t)data;
+    block[2] = len;
+    left = semihost_call(SEMIHOST_SYS_WRITE, (uint32_t)(uintptr_t)block);
+    block[0] = handle;
+    (void)semihost_call(SEMIHOST_SYS_CLOSE, (uint32_t)(uintptr_t)block);
+    return left == 0u ? 0 : -1;
 }
 
 /* Exit the emulator: QEMU returns 0 for success, 1 otherwise. */

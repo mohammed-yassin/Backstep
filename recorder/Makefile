@@ -15,13 +15,18 @@ CFLAGS  := -std=c99 -O2 -g -Wall -Wextra -Werror -Wshadow -Wpedantic \
 SANITIZE ?= -fsanitize=address,undefined -fno-omit-frame-pointer
 
 .PHONY: test clean
-test: $(BUILD)/test_recorder $(BUILD)/test_thumb_ldst
+test: $(BUILD)/test_recorder $(BUILD)/test_thumb_ldst $(BUILD)/test_irq_record
 	./$(BUILD)/test_recorder
 	./$(BUILD)/test_thumb_ldst
+	./$(BUILD)/test_irq_record
 
 $(BUILD)/test_recorder: tests/test_recorder.c src/backstep.c include/backstep.h
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) $(SANITIZE) -o $@ tests/test_recorder.c src/backstep.c
+
+$(BUILD)/test_irq_record: tests/test_irq_record.c src/irq_record.c include/backstep_irq.h
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) $(SANITIZE) -o $@ tests/test_irq_record.c src/irq_record.c
 
 $(BUILD)/ldst_vectors.h: tests/gen_ldst_vectors.py
 	@mkdir -p $(@D)

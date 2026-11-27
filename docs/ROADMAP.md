@@ -13,7 +13,7 @@ Status legend: **Done** (merged, automated criteria met) ·
 | # | Milestone | Status |
 |---|-----------|--------|
 | M0 | Foundation | Done (hardware check pending) |
-| M1 | Prototypes for the risky parts | In progress (peripheral-read capture done) |
+| M1 | Prototypes for the risky parts | In progress (read capture and interrupt position done) |
 | M2 | Cortex-M4 emulator | Planned |
 | M3 | First recording and replay (no interrupts) | Planned |
 | M4 | Interrupts and faults | Planned |
@@ -53,18 +53,21 @@ Status legend: **Done** (merged, automated criteria met) ·
 
 **Goal:** prove or reject the three hardest ideas before building on them.
 
-**Progress:** peripheral-read capture is done and decided in
-[ADR 0003](adr/0003-peripheral-read-capture.md); interrupt position and
-starting-state snapshot are next.
+**Progress:** peripheral-read capture is decided in
+[ADR 0003](adr/0003-peripheral-read-capture.md) and interrupt position in
+[ADR 0004](adr/0004-interrupt-position.md) (14,035 interrupts checked
+against QEMU's trace, zero errors). The starting-state snapshot is next.
 
 **Acceptance criteria**
 - Peripheral-read capture: a memory-protection-unit (MPU) trap prototype
   and a compiler-instrumentation prototype both capture 100% of reads in
   a test program; the chosen approach is recorded in an ADR with its
   measured cost per access.
-- Interrupt position (PC + registers + peripheral-read count) identifies
-  the exact instruction for 10,000 random interrupts in QEMU, with zero
-  errors.
+- Interrupt position (PC + registers + peripheral-read count + live
+  stack hash) is recorded exactly and identifies the interruption point
+  for at least 10,000 random interrupts in QEMU, with zero errors. Cases
+  the key cannot decide are counted and handled by replay lookahead
+  (ADR 0004).
 - A starting-state snapshot (RAM + registers) can be captured and
   restored; documented in an ADR.
 - *Hardware:* per-access overhead measured on NUCLEO-F411RE.
