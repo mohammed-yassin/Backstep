@@ -39,6 +39,9 @@ keeps it small enough for a microcontroller's RAM.
 - Dependency-free C99, no dynamic memory, no RTOS requirement.
 - Stores events in a caller-provided RAM buffer; the application decides
   how the recording leaves the chip (debug probe, UART, flash).
+- Captures peripheral reads with an MPU trap (`mpu_trap.c`, decoder in
+  `thumb_ldst.c`), or optionally with a Clang pass (`cc_hooks.c` +
+  `tools/clang-mmio-pass`); see [ADR 0003](adr/0003-peripheral-read-capture.md).
 - Ships the CRC-32 (`bs_crc32`) used for state checksums. The Rust host
   has an identical implementation; tests keep the two in sync.
 

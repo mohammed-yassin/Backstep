@@ -13,7 +13,7 @@ Status legend: **Done** (merged, automated criteria met) ·
 | # | Milestone | Status |
 |---|-----------|--------|
 | M0 | Foundation | Done (hardware check pending) |
-| M1 | Prototypes for the risky parts | Planned |
+| M1 | Prototypes for the risky parts | In progress (peripheral-read capture done) |
 | M2 | Cortex-M4 emulator | Planned |
 | M3 | First recording and replay (no interrupts) | Planned |
 | M4 | Interrupts and faults | Planned |
@@ -52,6 +52,10 @@ Status legend: **Done** (merged, automated criteria met) ·
 ## M1: Prototypes for the risky parts
 
 **Goal:** prove or reject the three hardest ideas before building on them.
+
+**Progress:** peripheral-read capture is done and decided in
+[ADR 0003](adr/0003-peripheral-read-capture.md); interrupt position and
+starting-state snapshot are next.
 
 **Acceptance criteria**
 - Peripheral-read capture: a memory-protection-unit (MPU) trap prototype

@@ -57,9 +57,11 @@ jobs:
 
   recorder:
     name: Recorder (host unit tests, ASan + UBSan)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Install Arm binutils (decoder test vectors)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends binutils-arm-none-eabi
       - run: scripts/ci.sh recorder
 
   firmware:
@@ -68,13 +70,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install Arm toolchain, QEMU and pyserial
+      - name: Install Arm toolchain, QEMU, Clang/LLVM and pyserial
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gcc-arm-none-eabi libnewlib-arm-none-eabi qemu-system-arm python3-serial
+            gcc-arm-none-eabi libnewlib-arm-none-eabi qemu-system-arm python3-serial \
+            clang llvm-dev
           arm-none-eabi-gcc --version | head -1
           qemu-system-arm --version | head -1
+          clang --version | head -1
       - run: scripts/ci.sh firmware
       - name: Upload firmware images
         uses: actions/upload-artifact@v4

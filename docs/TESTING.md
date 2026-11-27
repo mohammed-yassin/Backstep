@@ -12,7 +12,8 @@ how, and how to run it.
 3. Warnings are errors everywhere: C (`-Wall -Wextra -Werror` plus extra
    flags), Rust (`clippy -D warnings`, docs with `-D warnings`).
 4. Tests must be able to fail. New checks are tried against a broken input
-   at least once to confirm they catch it.
+   at least once to confirm they catch it (mutation testing: introduce a
+   bug on purpose, confirm the suite reports it).
 5. Behaviour that only real hardware can confirm is listed in
    [HARDWARE_VERIFICATION.md](HARDWARE_VERIFICATION.md) with a script to
    check it.
@@ -25,7 +26,10 @@ how, and how to run it.
 | Recorder unit tests (ASan + UBSan) | Recorder logic is correct and memory-safe | `recorder/tests/` |
 | Cross-language checks | C, Rust and Python `zlib` compute identical CRC-32 values | `recorder/tests/`, `crc32.rs`, `scripts/ci.sh` |
 | QEMU self-tests | Firmware startup, interrupts and recorder code run correctly on a Cortex-M4 | `firmware/targets/qemu-mps2-an386/`, `scripts/qemu-run.sh` |
-| QEMU board smoke test | Nucleo firmware programs the right registers before it reaches hardware | `scripts/qemu-nucleo-smoke.sh` |
+| QEMU board smoke tests | Nucleo firmware programs the right registers, and the Nucleo trap test runs end to end, before reaching hardware | `scripts/qemu-nucleo-smoke.sh`, `scripts/qemu-nucleo-trap-smoke.sh` |
+| Decoder vectors | The load/store decoder agrees with the GNU assembler on 1006 encodings; 2.6 M random encodings decode consistently | `recorder/tests/test_thumb_ldst.c`, `gen_ldst_vectors.py` |
+| MPU trap tests (QEMU) | Every load/store form, IT blocks, interrupts at both priorities, genuine-fault detection | `firmware/targets/qemu-mps2-an386/mmio_trap_test.c` |
+| Capture comparison | MPU trap and Clang pass capture byte-identical logs of the same workload | `scripts/capture-compare.sh` |
 | Differential tests (from M2) | Emulator matches QEMU instruction by instruction | planned |
 | Hardware-in-the-loop | Real chip behaviour: clocks, timing, LED, replay vs real dumps | `scripts/hil/` |
 | HIL script self-tests | The hardware scripts give correct verdicts (simulated board) | `scripts/hil/test_hil_scripts.py` |
