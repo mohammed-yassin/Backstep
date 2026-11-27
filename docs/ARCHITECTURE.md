@@ -44,6 +44,8 @@ keeps it small enough for a microcontroller's RAM.
   `tools/clang-mmio-pass`); see [ADR 0003](adr/0003-peripheral-read-capture.md).
 - Records the interruption key at every interrupt (`irq_record.c`); see
   [ADR 0004](adr/0004-interrupt-position.md).
+- Takes starting-state snapshots (`snapshot.c`); see
+  [ADR 0005](adr/0005-starting-state.md).
 - Ships the CRC-32 (`bs_crc32`) used for state checksums. The Rust host
   has an identical implementation; tests keep the two in sync.
 

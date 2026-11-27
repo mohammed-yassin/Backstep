@@ -4,9 +4,9 @@
 did on the real chip, then replay that exact execution on your PC and step
 *backwards* from a crash to the line that caused it.
 
-> **Status: pre-alpha (milestone M1 of 13).** The foundation is in place
-> and peripheral-read capture works on QEMU; recording and replay are
-> being built now. See the
+> **Status: pre-alpha.** Milestones M0 and M1 are done: the recorder can
+> capture peripheral reads, interrupt positions and a starting-state
+> snapshot, all verified on QEMU. The replay emulator (M2) is next. See the
 > [roadmap](docs/ROADMAP.md) for what works today and what comes next.
 
 ---
@@ -64,7 +64,7 @@ LLVM development files. On Ubuntu 24.04:
 
 ```bash
 sudo apt-get install gcc-arm-none-eabi libnewlib-arm-none-eabi \
-    qemu-system-arm python3-serial build-essential clang llvm-dev
+    qemu-system-arm python3-serial build-essential clang llvm-dev gdb-multiarch
 ```
 
 Run every check exactly as CI does:

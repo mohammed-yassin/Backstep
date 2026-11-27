@@ -13,7 +13,7 @@ Status legend: **Done** (merged, automated criteria met) ·
 | # | Milestone | Status |
 |---|-----------|--------|
 | M0 | Foundation | Done (hardware check pending) |
-| M1 | Prototypes for the risky parts | In progress (read capture and interrupt position done) |
+| M1 | Prototypes for the risky parts | Done (hardware check pending) |
 | M2 | Cortex-M4 emulator | Planned |
 | M3 | First recording and replay (no interrupts) | Planned |
 | M4 | Interrupts and faults | Planned |
@@ -53,10 +53,12 @@ Status legend: **Done** (merged, automated criteria met) ·
 
 **Goal:** prove or reject the three hardest ideas before building on them.
 
-**Progress:** peripheral-read capture is decided in
-[ADR 0003](adr/0003-peripheral-read-capture.md) and interrupt position in
+**Outcome:** peripheral-read capture is decided in
+[ADR 0003](adr/0003-peripheral-read-capture.md), interrupt position in
 [ADR 0004](adr/0004-interrupt-position.md) (14,035 interrupts checked
-against QEMU's trace, zero errors). The starting-state snapshot is next.
+against QEMU's trace, zero errors), and the starting-state snapshot in
+[ADR 0005](adr/0005-starting-state.md) (restored into a fresh machine,
+identical continuation, every part shown necessary).
 
 **Acceptance criteria**
 - Peripheral-read capture: a memory-protection-unit (MPU) trap prototype
@@ -68,8 +70,9 @@ against QEMU's trace, zero errors). The starting-state snapshot is next.
   for at least 10,000 random interrupts in QEMU, with zero errors. Cases
   the key cannot decide are counted and handled by replay lookahead
   (ADR 0004).
-- A starting-state snapshot (RAM + registers) can be captured and
-  restored; documented in an ADR.
+- A starting-state snapshot (RAM + registers + System Control Space) can
+  be captured and restored into a fresh machine with an identical
+  continuation; documented in an ADR.
 - *Hardware:* per-access overhead measured on NUCLEO-F411RE.
 
 ## M2: Cortex-M4 emulator
