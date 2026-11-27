@@ -16,7 +16,11 @@ _estack = ORIGIN(RAM) + LENGTH(RAM);
 
 SECTIONS
 {
-    .isr_vector : { KEEP(*(.isr_vector)) } > FLASH
+    .isr_vector :
+    {
+        KEEP(*(.isr_vector))        /* core exceptions 0-15 (startup) */
+        KEEP(*(.isr_vector.device)) /* device IRQs 16+ (firmware) */
+    } > FLASH
 
     .text :
     {

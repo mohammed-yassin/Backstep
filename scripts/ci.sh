@@ -37,6 +37,8 @@ run_firmware() {
     make -C firmware qemu-test
     step "Firmware: MPU trap vs Clang pass capture comparison"
     make -C firmware cc-test
+    step "Firmware: 14,000 recorded interrupt positions vs QEMU instruction trace"
+    make -C firmware irq-test
     step "Firmware: NUCLEO-F411RE smoke test on QEMU netduinoplus2"
     scripts/qemu-nucleo-smoke.sh firmware/build/nucleo-f411re/blinky.elf
     step "Firmware: NUCLEO-F411RE MPU trap test runs end to end on QEMU netduinoplus2"

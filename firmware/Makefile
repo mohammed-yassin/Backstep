@@ -30,11 +30,13 @@ CFLAGS  := $(ARCHFLAGS) -std=c99 -O2 -g3 -Wall -Wextra -Werror -Wshadow \
 LDFLAGS := $(ARCHFLAGS) -nostdlib -nostartfiles -Wl,--gc-sections \
            -Wl,--fatal-warnings -Wl,--no-warn-rwx-segments -Wl,-z,noexecstack
 
-COMMON_SRC := common/startup_cm4.c $(ROOT)/recorder/src/backstep.c
+COMMON_SRC := common/startup_cm4.c common/libc_min.c $(ROOT)/recorder/src/backstep.c
 
 QEMU_DIR   := targets/qemu-mps2-an386
 QEMU_ELF   := $(BUILD)/qemu-mps2-an386/hello.elf
 QEMU_TRAP  := $(BUILD)/qemu-mps2-an386/mmio_trap_test.elf
+QEMU_IRQ   := $(BUILD)/qemu-mps2-an386/irq_position_test.elf
+QEMU_IRQ0  := $(BUILD)/qemu-mps2-an386/irq_position_test_O0.elf
 NUCLEO_ELF := $(BUILD)/nucleo-f411re/blinky.elf
 NUCLEO_TRAP := $(BUILD)/nucleo-f411re/mmio_trap_hw.elf
 
@@ -51,8 +53,8 @@ CLANG_FLAGS := --target=arm-none-eabi -mthumb -mcpu=cortex-m4 -mfloat-abi=soft \
                -fshort-enums \
                -ffunction-sections -fdata-sections
 
-.PHONY: all clean qemu-test cc-test
-all: $(QEMU_ELF) $(QEMU_TRAP) $(CMP_MPU) $(NUCLEO_ELF) $(NUCLEO_ELF:.elf=.bin) $(NUCLEO_ELF:.elf=.hex) \
+.PHONY: all clean qemu-test cc-test irq-test
+all: $(QEMU_ELF) $(QEMU_TRAP) $(CMP_MPU) $(QEMU_IRQ) $(QEMU_IRQ0) $(NUCLEO_ELF) $(NUCLEO_ELF:.elf=.bin) $(NUCLEO_ELF:.elf=.hex) \
      $(NUCLEO_TRAP) $(NUCLEO_TRAP:.elf=.bin)
 
 $(BUILD)/qemu-mps2-an386/hello.elf: targets/qemu-mps2-an386/hello.c $(COMMON_SRC) targets/qemu-mps2-an386/link.ld common/semihost.h
@@ -73,6 +75,24 @@ $(CMP_MPU): $(QEMU_DIR)/capture_compare.c $(QEMU_DIR)/capture_workload.c $(QEMU_
 	$(CC) $(CFLAGS) -I $(ROOT)/recorder/src $(LDFLAGS) -T $(QEMU_DIR)/link.ld \
 	    -Wl,-Map=$(@:.elf=.map) -o $@ $(QEMU_DIR)/capture_compare.c $(QEMU_DIR)/capture_workload.c \
 	    $(COMMON_SRC) $(TRAP_SRC) -lgcc
+
+$(QEMU_IRQ): $(QEMU_DIR)/irq_position_test.c $(COMMON_SRC) $(ROOT)/recorder/src/irq_record.c $(ROOT)/recorder/include/backstep_irq.h $(QEMU_DIR)/link.ld common/qemu_test.h common/semihost.h
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) $(LDFLAGS) -T $(QEMU_DIR)/link.ld \
+	    -Wl,-Map=$(@:.elf=.map) -o $@ $(QEMU_DIR)/irq_position_test.c \
+	    $(COMMON_SRC) $(ROOT)/recorder/src/irq_record.c -lgcc
+	$(SIZE) $@
+
+# Same test built without optimisation: debug builds keep everything on the
+# stack, a different stress for interrupt-position keys.
+$(QEMU_IRQ0): $(QEMU_DIR)/irq_position_test.c $(COMMON_SRC) $(ROOT)/recorder/src/irq_record.c $(ROOT)/recorder/include/backstep_irq.h $(QEMU_DIR)/link.ld common/qemu_test.h common/semihost.h
+	@mkdir -p $(@D)
+	$(CC) $(subst -O2,-O0,$(CFLAGS)) $(LDFLAGS) -T $(QEMU_DIR)/link.ld \
+	    -Wl,-Map=$(@:.elf=.map) -o $@ $(QEMU_DIR)/irq_position_test.c \
+	    $(COMMON_SRC) $(ROOT)/recorder/src/irq_record.c -lgcc
+
+irq-test: $(QEMU_IRQ) $(QEMU_IRQ0)
+	$(ROOT)/scripts/irq-position-test.sh $(QEMU_IRQ) $(QEMU_IRQ0)
 
 $(PASS_PLUGIN): $(PASS_DIR)/BackstepMmioPass.cpp $(PASS_DIR)/Makefile
 	$(MAKE) -C $(PASS_DIR)
