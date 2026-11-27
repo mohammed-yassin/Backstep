@@ -48,13 +48,17 @@ run_firmware() {
     step "Firmware: host CLI agrees with recorder CRC on built image"
     local bin=firmware/build/nucleo-f411re/blinky.bin
     local ours theirs
-    ours="$(cd host && cargo run --quiet --locked -- crc32 "../$bin" | cut -d' ' -f1)"
+    ours="$(cd host && cargo run --quiet --locked -p backstep-cli -- crc32 "../$bin" | cut -d' ' -f1)"
     theirs="$(python3 -c 'import sys,zlib; print("%08X" % zlib.crc32(open(sys.argv[1],"rb").read()))' "$bin")"
     if [[ "$ours" != "$theirs" ]]; then
         echo "CRC mismatch: backstep=$ours zlib=$theirs" >&2
         exit 1
     fi
     echo "PASS backstep crc32 == zlib crc32 ($ours)"
+    step "Emulator: random Thumb programs, every instruction identical to QEMU"
+    (cd host && cargo build --locked --release -p backstep-emu)
+    python3 scripts/emu-difftest.py --emu host/target/release/backstep-emu-trace \
+        --programs 40 --length 1500 --seed "${EMU_DIFFTEST_SEED:-1}"
     step "Hardware test scripts: self-test against a simulated board"
     python3 scripts/hil/test_hil_scripts.py
 }

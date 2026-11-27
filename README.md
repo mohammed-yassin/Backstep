@@ -78,7 +78,7 @@ Build the firmware and try the CLI:
 ```bash
 make -C firmware                  # QEMU and NUCLEO-F411RE images
 make -C firmware qemu-test        # run the QEMU self-test
-cd host && cargo run -- info      # host tool version and targets
+cd host && cargo run -p backstep-cli -- info   # host tool version and targets
 ```
 
 ### Supported hardware

@@ -1,0 +1,16 @@
+[package]
+name = "backstep-emu"
+description = "Cortex-M4 instruction-set emulator used by Backstep's replay engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "backstep-emu-trace"
+path = "src/bin/trace.rs"
+
+[lints]
+workspace = true

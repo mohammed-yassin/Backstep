@@ -33,7 +33,8 @@ how, and how to run it.
 | Interrupt positions | 14,000 recorded interrupt contexts match QEMU's per-instruction trace; the key is unique or provably safe | `scripts/irq-position-test.sh`, `scripts/irq-position-check.py` |
 | Snapshot restore | A snapshot restored into a fresh QEMU continues identically; leaving out any part changes the result | `scripts/snapshot-restore-test.sh`, `scripts/snapshot_tool.py` |
 | Interrupt recorder logic | Context fields, alignment padding, stack hash, preemption before the stub's first instruction | `recorder/tests/test_irq_record.c` |
-| Differential tests (from M2) | Emulator matches QEMU instruction by instruction | planned |
+| Emulator differential test | Random Thumb programs: every register and xPSR identical to QEMU before every instruction; every instruction class executed | `scripts/emu-difftest.py` |
+| Emulator unit tests | Stop conditions, UNPREDICTABLE encodings, rollback on faults, ELF loading | `host/crates/backstep-emu` |
 | Hardware-in-the-loop | Real chip behaviour: clocks, timing, LED, replay vs real dumps | `scripts/hil/` |
 | HIL script self-tests | The hardware scripts give correct verdicts (simulated board) | `scripts/hil/test_hil_scripts.py` |
 
