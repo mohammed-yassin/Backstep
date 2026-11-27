@@ -42,30 +42,46 @@ static inline int semihost_get_cmdline(char *buf, uint32_t size)
                : -1;
 }
 
-/*
- * Write len bytes to a new host file (created/truncated, binary), in a
- * single semihosting call. Returns 0 on success.
- */
-static inline int semihost_write_file(const char *name, uint32_t name_len,
-                                      const void *data, uint32_t len)
+/* Open a host file for binary writing (created/truncated). Returns the
+ * handle, or 0xFFFFFFFF on failure. */
+static inline uint32_t semihost_open_write(const char *name, uint32_t name_len)
 {
     volatile uint32_t block[3];
-    uint32_t handle, left;
-
     block[0] = (uint32_t)(uintptr_t)name;
     block[1] = 5u; /* mode "wb" */
     block[2] = name_len;
-    handle = semihost_call(SEMIHOST_SYS_OPEN, (uint32_t)(uintptr_t)block);
-    if (handle == 0xFFFFFFFFu) {
-        return -1;
-    }
+    return semihost_call(SEMIHOST_SYS_OPEN, (uint32_t)(uintptr_t)block);
+}
+
+/* Write len bytes in one call. Returns 0 if everything was written. */
+static inline int semihost_write(uint32_t handle, const void *data, uint32_t len)
+{
+    volatile uint32_t block[3];
     block[0] = handle;
     block[1] = (uint32_t)(uintptr_t)data;
     block[2] = len;
-    left = semihost_call(SEMIHOST_SYS_WRITE, (uint32_t)(uintptr_t)block);
+    return semihost_call(SEMIHOST_SYS_WRITE, (uint32_t)(uintptr_t)block) == 0u ? 0 : -1;
+}
+
+static inline void semihost_close(uint32_t handle)
+{
+    volatile uint32_t block[1];
     block[0] = handle;
     (void)semihost_call(SEMIHOST_SYS_CLOSE, (uint32_t)(uintptr_t)block);
-    return left == 0u ? 0 : -1;
+}
+
+/* Write len bytes to a new host file in one call. Returns 0 on success. */
+static inline int semihost_write_file(const char *name, uint32_t name_len,
+                                      const void *data, uint32_t len)
+{
+    uint32_t h = semihost_open_write(name, name_len);
+    int rc;
+    if (h == 0xFFFFFFFFu) {
+        return -1;
+    }
+    rc = semihost_write(h, data, len);
+    semihost_close(h);
+    return rc;
 }
 
 /* Exit the emulator: QEMU returns 0 for success, 1 otherwise. */

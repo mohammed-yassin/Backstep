@@ -31,6 +31,7 @@ how, and how to run it.
 | MPU trap tests (QEMU) | Every load/store form, IT blocks, interrupts at both priorities, genuine-fault detection | `firmware/targets/qemu-mps2-an386/mmio_trap_test.c` |
 | Capture comparison | MPU trap and Clang pass capture byte-identical logs of the same workload | `scripts/capture-compare.sh` |
 | Interrupt positions | 14,000 recorded interrupt contexts match QEMU's per-instruction trace; the key is unique or provably safe | `scripts/irq-position-test.sh`, `scripts/irq-position-check.py` |
+| Snapshot restore | A snapshot restored into a fresh QEMU continues identically; leaving out any part changes the result | `scripts/snapshot-restore-test.sh`, `scripts/snapshot_tool.py` |
 | Interrupt recorder logic | Context fields, alignment padding, stack hash, preemption before the stub's first instruction | `recorder/tests/test_irq_record.c` |
 | Differential tests (from M2) | Emulator matches QEMU instruction by instruction | planned |
 | Hardware-in-the-loop | Real chip behaviour: clocks, timing, LED, replay vs real dumps | `scripts/hil/` |

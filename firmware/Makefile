@@ -37,6 +37,7 @@ QEMU_ELF   := $(BUILD)/qemu-mps2-an386/hello.elf
 QEMU_TRAP  := $(BUILD)/qemu-mps2-an386/mmio_trap_test.elf
 QEMU_IRQ   := $(BUILD)/qemu-mps2-an386/irq_position_test.elf
 QEMU_IRQ0  := $(BUILD)/qemu-mps2-an386/irq_position_test_O0.elf
+QEMU_SNAP  := $(BUILD)/qemu-mps2-an386/snapshot_test.elf
 NUCLEO_ELF := $(BUILD)/nucleo-f411re/blinky.elf
 NUCLEO_TRAP := $(BUILD)/nucleo-f411re/mmio_trap_hw.elf
 
@@ -53,8 +54,8 @@ CLANG_FLAGS := --target=arm-none-eabi -mthumb -mcpu=cortex-m4 -mfloat-abi=soft \
                -fshort-enums \
                -ffunction-sections -fdata-sections
 
-.PHONY: all clean qemu-test cc-test irq-test
-all: $(QEMU_ELF) $(QEMU_TRAP) $(CMP_MPU) $(QEMU_IRQ) $(QEMU_IRQ0) $(NUCLEO_ELF) $(NUCLEO_ELF:.elf=.bin) $(NUCLEO_ELF:.elf=.hex) \
+.PHONY: all clean qemu-test cc-test irq-test snapshot-test
+all: $(QEMU_ELF) $(QEMU_TRAP) $(CMP_MPU) $(QEMU_IRQ) $(QEMU_IRQ0) $(QEMU_SNAP) $(NUCLEO_ELF) $(NUCLEO_ELF:.elf=.bin) $(NUCLEO_ELF:.elf=.hex) \
      $(NUCLEO_TRAP) $(NUCLEO_TRAP:.elf=.bin)
 
 $(BUILD)/qemu-mps2-an386/hello.elf: targets/qemu-mps2-an386/hello.c $(COMMON_SRC) targets/qemu-mps2-an386/link.ld common/semihost.h
@@ -90,6 +91,15 @@ $(QEMU_IRQ0): $(QEMU_DIR)/irq_position_test.c $(COMMON_SRC) $(ROOT)/recorder/src
 	$(CC) $(subst -O2,-O0,$(CFLAGS)) $(LDFLAGS) -T $(QEMU_DIR)/link.ld \
 	    -Wl,-Map=$(@:.elf=.map) -o $@ $(QEMU_DIR)/irq_position_test.c \
 	    $(COMMON_SRC) $(ROOT)/recorder/src/irq_record.c -lgcc
+
+$(QEMU_SNAP): $(QEMU_DIR)/snapshot_test.c $(COMMON_SRC) $(ROOT)/recorder/src/snapshot.c $(ROOT)/recorder/include/backstep_snapshot.h $(QEMU_DIR)/link.ld common/qemu_test.h common/semihost.h
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) $(LDFLAGS) -T $(QEMU_DIR)/link.ld \
+	    -Wl,-Map=$(@:.elf=.map) -o $@ $(QEMU_DIR)/snapshot_test.c \
+	    $(COMMON_SRC) $(ROOT)/recorder/src/snapshot.c -lgcc
+
+snapshot-test: $(QEMU_SNAP)
+	$(ROOT)/scripts/snapshot-restore-test.sh $(QEMU_SNAP)
 
 irq-test: $(QEMU_IRQ) $(QEMU_IRQ0)
 	$(ROOT)/scripts/irq-position-test.sh $(QEMU_IRQ) $(QEMU_IRQ0)

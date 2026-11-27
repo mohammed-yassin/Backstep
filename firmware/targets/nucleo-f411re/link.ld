@@ -25,6 +25,7 @@ SECTIONS
     {
         *(.text*)
         *(.rodata*)
+        KEEP(*(.backstep.keep*)) /* entry points used only by a debugger */
         . = ALIGN(4);
     } > FLASH
 
@@ -47,6 +48,15 @@ SECTIONS
         *(COMMON)
         . = ALIGN(4);
         _ebss = .;
+    } > RAM
+
+    /* Backstep's own working memory (snapshot headers, logs). Kept out of
+     * [_sdata, _ebss) so a snapshot of the program's RAM excludes it. */
+    .backstep (NOLOAD) :
+    {
+        . = ALIGN(4);
+        *(.backstep*)
+        . = ALIGN(4);
     } > RAM
 
     /DISCARD/ : { *(.ARM.exidx*) }
