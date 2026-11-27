@@ -20,6 +20,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 M0 = HERE / "m0_nucleo_f411re.py"
+M1 = HERE / "m1_nucleo_f411re.py"
 
 
 def fake_board(master_fd: int, lines: list[str], period_s: float) -> None:
@@ -29,13 +30,14 @@ def fake_board(master_fd: int, lines: list[str], period_s: float) -> None:
         time.sleep(period_s)
 
 
-def run_case(name: str, lines: list[str], period_s: float, led: str, expect_ok: bool) -> bool:
+def run_case(name: str, lines: list[str], period_s: float, led: str, expect_ok: bool,
+             script: Path = M0) -> bool:
     master, slave = pty.openpty()
     port = os.ttyname(slave)
     feeder = threading.Thread(target=fake_board, args=(master, lines, period_s), daemon=True)
     feeder.start()
     proc = subprocess.run(
-        [sys.executable, str(M0), port, "--timeout", "15"],
+        [sys.executable, str(script), port, "--timeout", "15"],
         input=led + "\n", capture_output=True, text=True, timeout=30,
     )
     os.close(master)
@@ -62,6 +64,28 @@ def main() -> int:
         ("silent board fails", [], 1.0, "y", False),
     ]
     results = [run_case(*case) for case in cases]
+
+    m1_good = [
+        "BACKSTEP-M1 NUCLEO-F411RE MPU trap test",
+        "PASS GPIOB_AFRH holds test pattern",
+        "PASS ldr.n imm5",
+        "PASS   ...logged once with address and size",
+        "MEASURE cycles_per_1000_loads trapped=260000 plain=5000 "
+        "extra_cycles_per_trapped_load=255",
+        "PASS DWT cycle counter works",
+        "RESULT PASS",
+    ]
+    m1_fail = m1_good[:2] + ["FAIL ldr.n imm5", "     got 0x0 want 0x8A6B4C2D"] + m1_good[3:-1] + ["RESULT FAIL"]
+    m1_absurd = [l.replace("extra_cycles_per_trapped_load=255",
+                           "extra_cycles_per_trapped_load=9") for l in m1_good]
+    m1_cases = [
+        ("m1: healthy board passes", m1_good, 0.05, "", True),
+        ("m1: one failing check fails", m1_fail, 0.05, "", False),
+        ("m1: implausible cycle count fails", m1_absurd, 0.05, "", False),
+        ("m1: no RESULT line fails", m1_good[:-1], 0.05, "", False),
+        ("m1: silent board fails", [], 0.05, "", False),
+    ]
+    results += [run_case(*case, script=M1) for case in m1_cases]
     print(f"hil script self-test: {sum(results)}/{len(results)} cases correct")
     return 0 if all(results) else 1
 

@@ -6,6 +6,9 @@
 # against firmware that hangs.
 #
 # Usage: scripts/qemu-run.sh <firmware.elf> [timeout-seconds]
+# Extra QEMU options can be passed in QEMU_EXTRA_ARGS (e.g. "-icount shift=0"
+# to make instruction counts deterministic). SEMIHOST_ARG sets the command
+# line the firmware reads with semihost_get_cmdline() (selects test modes).
 #
 # SPDX-License-Identifier: MIT
 set -euo pipefail
@@ -23,7 +26,8 @@ set +e
 output="$(timeout "$limit" "$qemu" \
     -machine mps2-an386 -cpu cortex-m4 \
     -nographic -monitor none -serial stdio \
-    -semihosting-config enable=on,target=native \
+    -semihosting-config "enable=on,target=native${SEMIHOST_ARG:+,arg=$SEMIHOST_ARG}" \
+    ${QEMU_EXTRA_ARGS:-} \
     -kernel "$elf" 2>&1)"
 status=$?
 set -e

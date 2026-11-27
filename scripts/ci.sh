@@ -33,10 +33,14 @@ run_recorder() {
 run_firmware() {
     step "Firmware: build all targets (warnings are errors)"
     make -C firmware clean all
-    step "Firmware: QEMU mps2-an386 self-test"
-    scripts/qemu-run.sh firmware/build/qemu-mps2-an386/hello.elf
+    step "Firmware: QEMU mps2-an386 tests (self-test, MPU trap, genuine-fault mode)"
+    make -C firmware qemu-test
+    step "Firmware: MPU trap vs Clang pass capture comparison"
+    make -C firmware cc-test
     step "Firmware: NUCLEO-F411RE smoke test on QEMU netduinoplus2"
     scripts/qemu-nucleo-smoke.sh firmware/build/nucleo-f411re/blinky.elf
+    step "Firmware: NUCLEO-F411RE MPU trap test runs end to end on QEMU netduinoplus2"
+    scripts/qemu-nucleo-trap-smoke.sh firmware/build/nucleo-f411re/mmio_trap_hw.elf
     step "Firmware: host CLI agrees with recorder CRC on built image"
     local bin=firmware/build/nucleo-f411re/blinky.bin
     local ours theirs

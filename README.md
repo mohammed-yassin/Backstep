@@ -4,8 +4,9 @@
 did on the real chip, then replay that exact execution on your PC and step
 *backwards* from a crash to the line that caused it.
 
-> **Status: pre-alpha (milestone M0 of 13).** The project foundation is in
-> place; recording and replay are being built now. See the
+> **Status: pre-alpha (milestone M1 of 13).** The foundation is in place
+> and peripheral-read capture works on QEMU; recording and replay are
+> being built now. See the
 > [roadmap](docs/ROADMAP.md) for what works today and what comes next.
 
 ---
@@ -49,6 +50,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design.
 |------|------------|
 | `recorder/` | On-device recorder library (C99, no dependencies) |
 | `host/` | Rust workspace: `backstep` CLI and `backstep-core` library |
+| `tools/` | Optional Clang pass for compile-time capture |
 | `firmware/` | Example and test firmware for QEMU and NUCLEO-F411RE |
 | `scripts/` | CI, QEMU and hardware-in-the-loop test scripts |
 | `docs/` | Roadmap, architecture, testing strategy, design decisions |
@@ -56,12 +58,13 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design.
 ## Building and testing
 
 You need Rust (1.85 or newer), the Arm GNU toolchain
-(`arm-none-eabi-gcc`), `qemu-system-arm`, Python 3 with `pyserial`, and a
-host C compiler. On Ubuntu 24.04:
+(`arm-none-eabi-gcc`), `qemu-system-arm`, Python 3 with `pyserial`, a
+host C compiler, and (for the optional Clang capture pass) `clang` with
+LLVM development files. On Ubuntu 24.04:
 
 ```bash
 sudo apt-get install gcc-arm-none-eabi libnewlib-arm-none-eabi \
-    qemu-system-arm python3-serial build-essential
+    qemu-system-arm python3-serial build-essential clang llvm-dev
 ```
 
 Run every check exactly as CI does:

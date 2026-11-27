@@ -12,6 +12,7 @@
 
 #include <stdint.h>
 
+#define SEMIHOST_SYS_GET_CMDLINE 0x15u
 #define SEMIHOST_SYS_EXIT 0x18u
 #define SEMIHOST_ADP_STOPPED_APPLICATION_EXIT 0x20026u
 #define SEMIHOST_ADP_STOPPED_RUNTIME_ERROR 0x20023u
@@ -22,6 +23,20 @@ static inline uint32_t semihost_call(uint32_t op, uint32_t arg)
     register uint32_t r1 __asm__("r1") = arg;
     __asm__ volatile("bkpt 0xAB" : "+r"(r0) : "r"(r1) : "memory");
     return r0;
+}
+
+/*
+ * Read the command line QEMU was given with -append into buf (NUL
+ * terminated). Returns 0 on success.
+ */
+static inline int semihost_get_cmdline(char *buf, uint32_t size)
+{
+    volatile uint32_t block[2];
+    block[0] = (uint32_t)(uintptr_t)buf;
+    block[1] = size;
+    return semihost_call(SEMIHOST_SYS_GET_CMDLINE, (uint32_t)(uintptr_t)block) == 0u
+               ? 0
+               : -1;
 }
 
 /* Exit the emulator: QEMU returns 0 for success, 1 otherwise. */

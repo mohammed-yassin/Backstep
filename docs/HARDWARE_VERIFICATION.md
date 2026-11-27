@@ -9,6 +9,7 @@ Each entry has a script that prints a report block to paste below.
 | Milestone | Check | Script | Status |
 |-----------|-------|--------|--------|
 | M0 | Blinky boots from flash, LED LD2 blinks at 1 Hz, console at 115200 baud, heartbeat period 1.000 s, on-target CRC-32 correct | `scripts/hil/m0_nucleo_f411re.py` | Pending |
+| M1 | MPU trap on real STM32F411 registers: all load forms, stores, interrupts at priority 0x80 and 0, trapped console; cycles per trapped load (DWT) | `scripts/hil/m1_nucleo_f411re.py` | Pending |
 
 ## M0: blinky on NUCLEO-F411RE
 
@@ -30,5 +31,22 @@ Each entry has a script that prints a report block to paste below.
    ```
 6. Press the black RESET button when asked, answer the LED question, and
    paste the report block here.
+
+**Report:** _not run yet_
+
+## M1: MPU trap on NUCLEO-F411RE
+
+Same procedure as M0, with a different image and script:
+
+1. `make -C firmware`
+2. Copy `firmware/build/nucleo-f411re/mmio_trap_hw.bin` onto the
+   `NODE_F411RE` drive.
+3. `python3 scripts/hil/m1_nucleo_f411re.py <serial-port>`
+4. Press RESET when asked and paste the report block here. The measured
+   "extra cycles per trapped load" also goes into
+   [ADR 0003](adr/0003-peripheral-read-capture.md).
+
+The test temporarily writes `GPIOB_AFRH` (PB8-PB15 alternate functions,
+unused while those pins are inputs after reset) and restores it.
 
 **Report:** _not run yet_
