@@ -37,13 +37,14 @@ extern "C" {
 #endif
 
 #define BS_REC_MAGIC 0x43525342u /* "BSRC" little-endian */
-#define BS_REC_VERSION 2u /* 2: adds the IRQS chunk (M4) */
+#define BS_REC_VERSION 3u /* 2: adds the IRQS chunk (M4); 3: FPUS (M7) */
 
 /* Chunk types: four ASCII characters, little-endian. */
 #define BS_REC_CHUNK_TARGET 0x44544754u /* "TGTD" */
 #define BS_REC_CHUNK_SNAPSHOT 0x50414E53u /* "SNAP" */
 #define BS_REC_CHUNK_MMIO 0x4F494D4Du   /* "MMIO" */
 #define BS_REC_CHUNK_IRQS 0x53515249u   /* "IRQS" */
+#define BS_REC_CHUNK_FPU 0x53555046u    /* "FPUS": FP state at start and end */
 #define BS_REC_CHUNK_END 0x20444E45u    /* "END " */
 
 /* Target identifiers (the replay tool's memory map and core options). */

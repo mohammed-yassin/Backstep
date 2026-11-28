@@ -39,7 +39,7 @@ import sys
 from array import array
 from dataclasses import dataclass, field
 
-EVENT_WORDS = 20  # struct bs_irq_event
+EVENT_WORDS = 21  # struct bs_irq_event (with fpccr since M7)
 STACK_HASH_BYTES = 128  # BS_STACK_HASH_BYTES
 STORE_MNEMONIC = re.compile(r"^(str|stm|push|vstr|vstm|vpush)", re.I)
 
@@ -253,7 +253,7 @@ def load_events(path: str) -> list[dict]:
     n = len(data) // (EVENT_WORDS * 4)
     events = []
     for i in range(n):
-        w = struct.unpack_from("<20I", data, i * EVENT_WORDS * 4)
+        w = struct.unpack_from(f"<{EVENT_WORDS}I", data, i * EVENT_WORDS * 4)
         events.append({
             "exception": w[0],
             "state": (*w[1:14], w[14], w[15], w[16], w[17]),  # r0-r12 sp lr pc xpsr
@@ -309,9 +309,14 @@ def main() -> int:
 
     syms = elf_symbols(args.elf, args.nm)
     insns = disassemble(args.elf, args.objdump)
-    # g_mmio_reads becomes visible when mmio_read's store to it executes.
+    # g_mmio_reads becomes visible when mmio_read's store to it executes:
+    # the first store after its CPSID (interrupts are masked from there
+    # to the CPSIE, so which instruction inside counts does not matter;
+    # at -O0 an earlier store saves the argument to the stack).
+    masked_from = min(pc for pc, (fn, mnem, _) in insns.items()
+                      if fn == "mmio_read" and mnem.startswith("cpsid"))
     mmio_pc = min(pc for pc, (fn, mnem, _) in insns.items()
-                  if fn == "mmio_read" and mnem.startswith("str"))
+                  if fn == "mmio_read" and mnem.startswith("str") and pc > masked_from)
     stub_pcs = {syms[s] & ~1 for s in ("SysTick_Handler", "timer0_stub")}
     stores = classify_stores(insns)
     stack_floor = syms["_ebss"]  # the stack grows down towards .bss

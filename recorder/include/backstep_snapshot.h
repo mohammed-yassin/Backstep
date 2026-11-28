@@ -76,9 +76,32 @@ struct bs_snapshot_header {
     uint32_t regions_crc32; /* CRC-32 of all region bytes, in order */
 };
 
+/* Floating-point state at a bs_snapshot_take() (M7). valid is 1 when the
+ * FPU was accessible there (CPACR grants the current mode access to
+ * cp10), and the other fields are then filled; otherwise everything is 0
+ * and the FPU was not touched. Field order is part of the file format. */
+struct bs_fp_state {
+    uint32_t valid;
+    uint32_t s[32];  /* S0-S31 */
+    uint32_t fpscr;
+    uint32_t fpccr;  /* FPCCR, FPCAR, FPDSCR (SCS registers) */
+    uint32_t fpcar;
+    uint32_t fpdscr;
+};
+
+/* Where each bs_snapshot_take() leaves the floating-point state it found
+ * (in .backstep, outside the program's RAM). Reading it executes FP
+ * instructions, which on a core with FPCCR.ASPEN set and CONTROL.FPCA
+ * clear first create a new floating-point context (FPSCR = FPDSCR,
+ * FPCA = 1); the recorded FPSCR and CONTROL are those after that. */
+extern struct bs_fp_state bs_snapshot_fp;
+
 /* Record the caller's r4-r11, SP, return address and special registers
- * into cpu, then call save(cpu). Returns 0, and 1 in a machine restored
- * from the snapshot (which resumes with r0 = 1 at the return address). */
+ * into cpu, and the floating-point state into bs_snapshot_fp, then call
+ * save(cpu). Returns 0, and 1 in a machine restored from the snapshot
+ * (which resumes with r0 = 1 at the return address). On the way back
+ * S0-S31 and FPSCR are reloaded from bs_snapshot_fp, so the returning
+ * state depends only on what was recorded. */
 int bs_snapshot_take(struct bs_cpu_state *cpu,
                      void (*save)(const struct bs_cpu_state *cpu));
 
@@ -95,6 +118,8 @@ void bs_snapshot_header_build(struct bs_snapshot_header *hdr,
  * hdr, set SP to any scratch stack below hdr->cpu.sp, and jumped here
  * with r0 = hdr. Restores the System Control Space, then the CPU
  * registers, and continues at hdr->cpu.pc with r0 = 1. Never returns.
+ * The floating-point state is not restored (the test that uses this is
+ * built soft-float).
  */
 void bs_snapshot_resume(const struct bs_snapshot_header *hdr)
     __attribute__((noreturn));

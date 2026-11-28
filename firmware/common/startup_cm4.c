@@ -61,6 +61,13 @@ void Reset_Handler(void)
     uint32_t *src = &_sidata;
     uint32_t *dst = &_sdata;
 
+#if defined(__ARM_FP)
+    /* Hard-float builds: the FPU first, as SystemInit does in STM32
+     * projects (compiled code may use FP registers anywhere after this). */
+    *(volatile uint32_t *)0xE000ED88u |= 0xFu << 20; /* CPACR: cp10, cp11 */
+    __asm__ volatile("dsb\n\tisb" ::: "memory");
+#endif
+
     while (dst < &_edata) {
         *dst++ = *src++;
     }

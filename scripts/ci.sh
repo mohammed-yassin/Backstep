@@ -75,6 +75,10 @@ run_firmware() {
     make -C firmware replay-test
     step "Replay: nested interrupts from 3 sources at random rates, 100 of 100 QEMU runs replay exactly; crashes; traces vs QEMU; corrupted IRQS detected"
     make -C firmware replay-irq-test
+    step "Replay with the FPU: hard-float firmware with FP work in the main code and handlers, 40 of 40 QEMU runs replay exactly; crashes; traces vs QEMU with S0-S31"
+    make -C firmware replay-irq-fp-test
+    step "Recorder: no floating-point instructions in the capture code of a hard-float image"
+    python3 scripts/check-recorder-no-fpu.py firmware/build/qemu-mps2-an386/replay_irq_test_fp.elf
     step "GDB: 30 scripted sessions against backstep gdb (forwards and backwards, breakpoints, watchpoints, the demo bug)"
     make -C firmware gdb-test
     step "Queries: backstep why and timeline trace three example bugs (overrun, stack overflow, race) to their source lines"

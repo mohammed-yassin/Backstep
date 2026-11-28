@@ -3,6 +3,7 @@
  *
  * SPDX-License-Identifier: MIT
  */
+#include "bs_no_fpu.h"
 #include "backstep.h"
 #include "backstep_irq.h"
 
@@ -45,11 +46,24 @@ void bs_irq_record_stop(void)
     s_active = 0u;
 }
 
+/* FPCCR, if CPACR gives any access to the FPU (CPACR and FPCCR are
+ * System Control Space registers: no FP instruction, so no lazy state
+ * preservation). Not on the host, where the unit tests run. */
+static uint32_t read_fpccr(void)
+{
+#if defined(__arm__)
+    if (((*(volatile const uint32_t *)0xE000ED88u >> 20) & 3u) != 0u) {
+        return *(volatile const uint32_t *)0xE000EF34u;
+    }
+#endif
+    return BS_IRQ_NO_FPCCR;
+}
+
 void bs_irq_record(const uint32_t *callee, const uint32_t *frame, uint32_t ipsr,
                    uint32_t stub_address)
 {
     struct bs_irq_event *e;
-    uint32_t n = s_count, i, xpsr, mmio;
+    uint32_t n = s_count, i, xpsr, mmio, words_in_frame, pad;
 
     if (s_active == 0u) {
         return;
@@ -65,11 +79,15 @@ void bs_irq_record(const uint32_t *callee, const uint32_t *frame, uint32_t ipsr,
     /* If the previous event interrupted this very stub at its first
      * instruction, it preempted this exception before anything of ours
      * ran: our interruption point had the same peripheral-read count, and
-     * any reads since then were made by that nested handler. */
+     * any reads since then were made by that nested handler. Several
+     * interrupts in a row can preempt the stub there (each handler
+     * returning to the same first instruction): the first of them has
+     * the count of our interruption point. */
     mmio = s_mmio ? *s_mmio : 0u;
-    if (n > 0u && s_log[n - 1u].pc == (stub_address & ~1u) &&
-        (s_log[n - 1u].xpsr & 0x1FFu) == (ipsr & 0x1FFu)) {
-        mmio = s_log[n - 1u].mmio_index;
+    for (i = n; i > 0u && s_log[i - 1u].pc == (stub_address & ~1u) &&
+                (s_log[i - 1u].xpsr & 0x1FFu) == (ipsr & 0x1FFu);
+         --i) {
+        mmio = s_log[i - 1u].mmio_index;
     }
 
     e = &s_log[n];
@@ -85,14 +103,19 @@ void bs_irq_record(const uint32_t *callee, const uint32_t *frame, uint32_t ipsr,
     e->r[12] = frame[4];
     e->lr = frame[5];
     e->pc = frame[6];
-    /* Bit 9 of the stacked xPSR says the hardware added 4 bytes of padding
-     * to align the frame; it is not part of the interrupted xPSR. */
-    e->sp = (uint32_t)(uintptr_t)frame + 32u + ((xpsr & (1u << 9)) ? 4u : 0u);
+    /* The frame is 8 words, or 26 with the floating-point part (an
+     * extended frame: EXC_RETURN, saved by the stub after r4-r11, has bit 4
+     * clear). Bit 9 of the stacked xPSR says the hardware added 4 bytes of
+     * padding to align it; it is not part of the interrupted xPSR. */
+    words_in_frame = (callee[8] & 0x10u) ? 8u : 26u;
+    pad = (xpsr & (1u << 9)) ? 1u : 0u;
+    e->sp = (uint32_t)(uintptr_t)(frame + words_in_frame + pad);
     e->xpsr = xpsr & ~(1u << 9);
     e->mmio_index = mmio;
+    e->fpccr = read_fpccr();
     {
         /* Live stack of the interrupted code starts right above the frame. */
-        const uint32_t *live = frame + 8 + ((xpsr & (1u << 9)) ? 1 : 0);
+        const uint32_t *live = frame + words_in_frame + pad;
         uintptr_t avail = (uintptr_t)s_stack_top > (uintptr_t)live
                               ? ((uintptr_t)s_stack_top - (uintptr_t)live) / 4u
                               : 0u;

@@ -5,6 +5,7 @@
  *
  * SPDX-License-Identifier: MIT
  */
+#include "bs_no_fpu.h"
 #include "backstep.h"
 #include "backstep_mmio.h"
 

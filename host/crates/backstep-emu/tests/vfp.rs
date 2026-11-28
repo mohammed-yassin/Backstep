@@ -431,3 +431,40 @@ fn a_handler_without_floating_point_returns_lazily() {
     assert_eq!(cpu.scs.fpccr & fpccr::LSPACT, 0);
     assert_eq!((cpu.s[0], cpu.r[13], cpu.control & 4), (0x100, sp, 4));
 }
+
+#[test]
+fn an_interrupt_can_be_taken_as_a_tail_chain_after_a_return() {
+    // The SVCall handler uses the FPU (lazy preservation), then returns:
+    // the thread's S0 comes back from the frame. Taken as a tail-chain
+    // instead, PendSV starts with the handler's S0 and FPCCR, on the same
+    // frame, as if it had been pending at the return.
+    let mut cpu = cpu_with_svc_handler(&[VADD]);
+    cpu.memory.load(4 * 14, &0x201u32.to_le_bytes()).unwrap(); // PendSV
+    cpu.s[1] = f(2.0);
+    cpu.s[2] = f(3.0);
+    let sp = cpu.r[13];
+    assert!(
+        !cpu.tail_chain_after_return(&mut NoBus, 14).unwrap(),
+        "no return yet"
+    );
+    run(&mut cpu, 3); // svc, vadd, bx lr
+    assert_eq!((cpu.ipsr, cpu.s[0]), (0, 0x100), "returned: S0 restored");
+    let returns = cpu.stats.returns[1];
+    let mut fresh = cpu.clone();
+    assert!(cpu.tail_chain_after_return(&mut NoBus, 14).unwrap());
+    assert_eq!(cpu.ipsr, 14);
+    assert_eq!(cpu.s[0], f(5.0), "the handler's S0");
+    assert_eq!(cpu.r[13], sp - 0x68, "the same frame");
+    assert_eq!(cpu.r[14], 0xFFFF_FFE9);
+    assert_eq!(cpu.control & 4, 0);
+    assert_eq!(cpu.scs.fpccr & fpccr::LSPACT, 0, "state already preserved");
+    assert_eq!(cpu.stats.returns[1], returns - 1);
+    assert_eq!(cpu.stats.tail_chained, 1);
+    // A fresh entry instead pushes a new frame from the thread's state.
+    assert!(fresh.interrupt_now(&mut NoBus, 14).unwrap());
+    assert_eq!(fresh.s[0], 0x100);
+    assert_ne!(fresh.scs.fpccr & fpccr::LSPACT, 0, "lazy again");
+    // Only right after the return.
+    run(&mut fresh, 1);
+    assert!(!fresh.tail_chain_after_return(&mut NoBus, 14).unwrap());
+}

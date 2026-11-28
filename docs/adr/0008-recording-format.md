@@ -1,7 +1,8 @@
 # ADR 0008: The recording file and how replay checks it
 
 **Status:** Accepted (M3); version 2 adds interrupts (M4,
-[ADR 0009](0009-replaying-interrupts.md))
+[ADR 0009](0009-replaying-interrupts.md)); version 3 adds the
+floating-point state (M7, [ADR 0012](0012-floating-point.md))
 
 ## Context
 
@@ -42,7 +43,7 @@ replayed into a plausible-looking false history.
 **The file** (little-endian `u32`s):
 
 ```text
-header   "BSRC", version 2, header size 16, chunk count 5
+header   "BSRC", version 3, header size 16, chunk count 6
 chunk    type (4 ASCII bytes), payload length, payload, CRC-32 of the payload
   TGTD   target id, CRC-32 of the firmware image, image start, image length
   SNAP   the snapshot exactly as ADR 0005 defines it (header with its own
@@ -50,8 +51,13 @@ chunk    type (4 ASCII bytes), payload length, payload, CRC-32 of the payload
   MMIO   load count, dropped count, then 16 bytes per load
          (address, value, pc, size)
   IRQS   event count, dropped count, stack top (the limit of the stack
-         hash), then 80 bytes per interrupt (struct bs_irq_event:
-         exception number, r0-r12, SP, LR, PC, xPSR, read count, hash)
+         hash), then 84 bytes per interrupt (struct bs_irq_event:
+         exception number, r0-r12, SP, LR, PC, xPSR, read count, hash,
+         FPCCR at the stub's entry or 0xFFFFFFFF with the FPU disabled;
+         80 bytes, without FPCCR, in version 2)
+  FPUS   the floating-point state at the start and at the end, 148 bytes
+         each (struct bs_fp_state: valid, S0-S31, FPSCR, FPCCR, FPCAR,
+         FPDSCR; all zero where the FPU was not accessible)
   END    end registers (struct bs_cpu_state), RAM CRC-32, region count,
          the regions checksummed
 trailer  CRC-32 of every byte before it
@@ -62,6 +68,9 @@ end of the `.data` initialisers (`__backstep_image_start/end`, from the
 linker scripts). Replay computes the same CRC from the ELF. Chunks are
 fixed in number and order for a version. Version 1 (M3) has no IRQS
 chunk; replay still reads it, as a recording without interrupts.
+Version 2 (M4) has no FPUS chunk and shorter interrupt events; replay
+reads it as a recording without floating-point state, and refuses it if
+its snapshot has the FPU enabled.
 
 **The self-check** has two layers:
 

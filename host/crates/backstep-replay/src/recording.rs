@@ -11,9 +11,10 @@
 //!
 //! Chunks, in this order: `TGTD` (target and firmware identity), `SNAP`
 //! (the starting-state snapshot of ADR 0005), `MMIO` (the peripheral
-//! loads), `IRQS` (where each interrupt arrived, ADR 0004; version 2 only),
-//! `END ` (the state replay must reach). Version 1 files (no `IRQS`) are
-//! still read.
+//! loads), `IRQS` (where each interrupt arrived, ADR 0004; version 2 on),
+//! `FPUS` (the floating-point state at the start and the end; version 3),
+//! `END ` (the state replay must reach). Version 1 files (no `IRQS`) and
+//! version 2 files (no `FPUS`) are still read.
 
 use std::fmt;
 
@@ -21,9 +22,14 @@ use backstep_core::crc32::{crc32, update};
 
 /// "BSRC".
 pub const MAGIC: u32 = 0x4352_5342;
-/// The format version this code writes (it also reads version 1).
-pub const VERSION: u32 = 2;
-const IRQ_EVENT_WORDS: usize = 20;
+/// The format version this code writes (it also reads versions 1 and 2).
+pub const VERSION: u32 = 3;
+const FP_STATE_WORDS: usize = 37;
+/// Words of an interrupt event: 20, and 21 from version 3 (FPCCR).
+const IRQ_EVENT_WORDS: usize = 21;
+const IRQ_EVENT_WORDS_V2: usize = 20;
+/// `BS_IRQ_NO_FPCCR`: the FPU was disabled at the interrupt.
+const NO_FPCCR: u32 = 0xFFFF_FFFF;
 const SNAPSHOT_MAGIC: u32 = 0x504E_5342; // "BSNP"
 const SNAPSHOT_HEADER_BYTES: usize = 524;
 const CPU_WORDS: usize = 23;
@@ -38,6 +44,8 @@ pub mod chunk {
     pub const MMIO: [u8; 4] = *b"MMIO";
     /// Interrupt positions (version 2).
     pub const IRQS: [u8; 4] = *b"IRQS";
+    /// Floating-point state (version 3).
+    pub const FPU: [u8; 4] = *b"FPUS";
     /// End state.
     pub const END: [u8; 4] = *b"END ";
 }
@@ -104,6 +112,51 @@ impl CpuState {
             faultmask: w[21],
             control: w[22],
         }
+    }
+}
+
+/// Floating-point state at the start or the end (`struct bs_fp_state`).
+/// Not valid (all zero) when the FPU was not accessible there, and in
+/// recordings before version 3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FpState {
+    /// The FPU was accessible and the fields below were recorded.
+    pub valid: bool,
+    /// S0-S31.
+    pub s: [u32; 32],
+    /// FPSCR.
+    pub fpscr: u32,
+    /// FPCCR.
+    pub fpccr: u32,
+    /// FPCAR.
+    pub fpcar: u32,
+    /// FPDSCR.
+    pub fpdscr: u32,
+}
+
+impl FpState {
+    fn words(&self) -> [u32; FP_STATE_WORDS] {
+        let mut w = [0u32; FP_STATE_WORDS];
+        w[0] = u32::from(self.valid);
+        w[1..33].copy_from_slice(&self.s);
+        w[33..].copy_from_slice(&[self.fpscr, self.fpccr, self.fpcar, self.fpdscr]);
+        w
+    }
+
+    fn from_words(w: &[u32]) -> Result<Self, FormatError> {
+        if w[0] > 1 {
+            return Err(malformed("FPUS valid flag"));
+        }
+        let mut s = [0u32; 32];
+        s.copy_from_slice(&w[1..33]);
+        Ok(FpState {
+            valid: w[0] == 1,
+            s,
+            fpscr: w[33],
+            fpccr: w[34],
+            fpcar: w[35],
+            fpdscr: w[36],
+        })
     }
 }
 
@@ -185,6 +238,10 @@ pub struct IrqEvent {
     pub mmio_index: u32,
     /// FNV-1a hash of up to 128 bytes of stack above SP.
     pub stack_hash: u32,
+    /// FPCCR at the stub's entry (version 3, with the FPU enabled): tells
+    /// an interrupt tail-chained from the previous handler from one that
+    /// arrived right after its return.
+    pub fpccr: Option<u32>,
 }
 
 impl IrqEvent {
@@ -199,10 +256,12 @@ impl IrqEvent {
             self.xpsr,
             self.mmio_index,
             self.stack_hash,
+            self.fpccr.unwrap_or(NO_FPCCR),
         ]);
         w
     }
 
+    /// From 20 (version 2) or 21 words.
     fn from_words(w: &[u32]) -> Self {
         let mut r = [0u32; 13];
         r.copy_from_slice(&w[1..14]);
@@ -215,6 +274,7 @@ impl IrqEvent {
             xpsr: w[17],
             mmio_index: w[18],
             stack_hash: w[19],
+            fpccr: w.get(20).copied().filter(|&f| f != NO_FPCCR),
         }
     }
 }
@@ -251,6 +311,11 @@ pub struct Recording {
     pub irqs: Vec<IrqEvent>,
     /// Top of the stack, the limit of the interrupt keys' stack hash.
     pub irq_stack_top: u32,
+    /// Floating-point state at the start (not valid before version 3, or
+    /// with the FPU not accessible).
+    pub fp_start: FpState,
+    /// Floating-point state at the end.
+    pub fp_end: FpState,
     /// The state replay must reach.
     pub end: EndState,
 }
@@ -363,7 +428,7 @@ pub fn parse(data: &[u8]) -> Result<Recording, FormatError> {
         return Err(FormatError::BadMagic);
     }
     let version = r.u32()?;
-    if version != 1 && version != VERSION {
+    if !(1..=VERSION).contains(&version) {
         return Err(FormatError::UnsupportedVersion(version));
     }
     let trailer = u32::from_le_bytes([
@@ -375,17 +440,7 @@ pub fn parse(data: &[u8]) -> Result<Recording, FormatError> {
     if crc32(body) != trailer {
         return Err(FormatError::FileChecksum);
     }
-    let order: &[[u8; 4]] = if version == 1 {
-        &[chunk::TARGET, chunk::SNAPSHOT, chunk::MMIO, chunk::END]
-    } else {
-        &[
-            chunk::TARGET,
-            chunk::SNAPSHOT,
-            chunk::MMIO,
-            chunk::IRQS,
-            chunk::END,
-        ]
-    };
+    let order = chunk_order(version);
     if r.u32()? != 16 || r.u32()? as usize != order.len() {
         return Err(malformed("header"));
     }
@@ -429,11 +484,16 @@ pub fn parse(data: &[u8]) -> Result<Recording, FormatError> {
     let (irqs, irq_dropped, irq_stack_top) = if version == 1 {
         (Vec::new(), 0, 0)
     } else {
-        parse_irqs(payloads[3])?
+        parse_irqs(payloads[3], version)?
     };
     if irq_dropped != 0 {
         return Err(FormatError::DroppedInterrupts(irq_dropped));
     }
+    let fp = if version >= 3 {
+        parse_fp(payloads[4])?
+    } else {
+        [FpState::default(); 2]
+    };
     let end = parse_end(payloads[payloads.len() - 1])?;
     Ok(Recording {
         target_id: target[0],
@@ -445,20 +505,57 @@ pub fn parse(data: &[u8]) -> Result<Recording, FormatError> {
         dropped,
         irqs,
         irq_stack_top,
+        fp_start: fp[0],
+        fp_end: fp[1],
         end,
     })
 }
 
-fn parse_irqs(p: &[u8]) -> Result<(Vec<IrqEvent>, u32, u32), FormatError> {
+/// The chunks a file of each version has, in order.
+fn chunk_order(version: u32) -> &'static [[u8; 4]] {
+    match version {
+        1 => &[chunk::TARGET, chunk::SNAPSHOT, chunk::MMIO, chunk::END],
+        2 => &[
+            chunk::TARGET,
+            chunk::SNAPSHOT,
+            chunk::MMIO,
+            chunk::IRQS,
+            chunk::END,
+        ],
+        _ => &[
+            chunk::TARGET,
+            chunk::SNAPSHOT,
+            chunk::MMIO,
+            chunk::IRQS,
+            chunk::FPU,
+            chunk::END,
+        ],
+    }
+}
+
+fn parse_fp(p: &[u8]) -> Result<[FpState; 2], FormatError> {
     let w = words(p);
-    if w.len() < 3
-        || (w.len() - 3) % IRQ_EVENT_WORDS != 0
-        || (w.len() - 3) / IRQ_EVENT_WORDS != w[0] as usize
-    {
+    if w.len() != 2 * FP_STATE_WORDS {
+        return Err(malformed("FPUS size"));
+    }
+    Ok([
+        FpState::from_words(&w[..FP_STATE_WORDS])?,
+        FpState::from_words(&w[FP_STATE_WORDS..])?,
+    ])
+}
+
+fn parse_irqs(p: &[u8], version: u32) -> Result<(Vec<IrqEvent>, u32, u32), FormatError> {
+    let w = words(p);
+    let size = if version >= 3 {
+        IRQ_EVENT_WORDS
+    } else {
+        IRQ_EVENT_WORDS_V2
+    };
+    if w.len() < 3 || (w.len() - 3) % size != 0 || (w.len() - 3) / size != w[0] as usize {
         return Err(malformed("IRQS size does not match its count"));
     }
     let events = w[3..]
-        .chunks_exact(IRQ_EVENT_WORDS)
+        .chunks_exact(size)
         .map(IrqEvent::from_words)
         .collect();
     Ok((events, w[1], w[2]))
@@ -582,7 +679,7 @@ fn push_chunk(out: &mut Vec<u8>, t: [u8; 4], payload: &[u8]) {
 pub fn write(rec: &Recording) -> Vec<u8> {
     let len32 = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
     let mut out = Vec::new();
-    push_words(&mut out, &[MAGIC, VERSION, 16, 5]);
+    push_words(&mut out, &[MAGIC, VERSION, 16, 6]);
     let mut target = Vec::new();
     push_words(
         &mut target,
@@ -655,6 +752,11 @@ pub fn write(rec: &Recording) -> Vec<u8> {
         push_words(&mut irqs, &e.words());
     }
     push_chunk(&mut out, chunk::IRQS, &irqs);
+
+    let mut fp = Vec::new();
+    push_words(&mut fp, &rec.fp_start.words());
+    push_words(&mut fp, &rec.fp_end.words());
+    push_chunk(&mut out, chunk::FPU, &fp);
 
     let mut end = Vec::new();
     push_words(&mut end, &rec.end.cpu.words());

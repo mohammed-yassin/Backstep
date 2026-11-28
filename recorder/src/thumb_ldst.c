@@ -6,6 +6,7 @@
  *
  * SPDX-License-Identifier: MIT
  */
+#include "bs_no_fpu.h"
 #include "thumb_ldst.h"
 
 #define REG_SP 13u

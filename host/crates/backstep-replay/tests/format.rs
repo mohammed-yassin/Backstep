@@ -3,7 +3,7 @@
 //! replay half is tested end to end by scripts/replay-test.py).
 
 use backstep_replay::recording::{
-    parse, write, CpuState, EndState, FormatError, IrqEvent, MmioEvent, Recording, Region,
+    parse, write, CpuState, EndState, FormatError, FpState, IrqEvent, MmioEvent, Recording, Region,
     ScsState, Snapshot,
 };
 
@@ -66,9 +66,19 @@ fn sample() -> Recording {
                 xpsr: 0x0100_0000 | i,
                 mmio_index: 2 * i,
                 stack_hash: 0xABCD_0000 + i,
+                fpccr: (i != 1).then_some(0xC000_0031 - i),
             })
             .collect(),
         irq_stack_top: 0x2000_1000,
+        fp_start: FpState {
+            valid: true,
+            s: std::array::from_fn(|i| 0x3F80_0000 + u32::try_from(i).unwrap()),
+            fpscr: 0x0300_0010,
+            fpccr: 0xC000_0000,
+            fpcar: 0x2000_0F80,
+            fpdscr: 0x0040_0000,
+        },
+        fp_end: FpState::default(),
         end: EndState {
             cpu,
             ram_crc32: 0x1234_5678,
@@ -116,8 +126,8 @@ fn unusable_recordings_say_why() {
     rec.dropped = 3;
     assert_eq!(parse(&write(&rec)), Err(FormatError::Dropped(3)));
     let mut bytes = write(&sample());
-    bytes[4] = 3; // version
-    assert_eq!(parse(&bytes), Err(FormatError::UnsupportedVersion(3)));
+    bytes[4] = 4; // version
+    assert_eq!(parse(&bytes), Err(FormatError::UnsupportedVersion(4)));
     assert_eq!(parse(b"ELF\x7f....."), Err(FormatError::BadMagic));
     // A snapshot whose region CRC does not match (written consistently
     // otherwise) is caught by the snapshot's own checksum.
@@ -174,6 +184,15 @@ fn chunks(bytes: &[u8]) -> Vec<([u8; 4], Vec<u8>)> {
     out
 }
 
+/// The IRQS chunk with the events of version 2 (20 words, no FPCCR).
+fn irqs_v2(payload: &[u8]) -> Vec<u8> {
+    let mut out = payload[..12].to_vec();
+    for event in payload[12..].chunks(84) {
+        out.extend_from_slice(&event[..80]);
+    }
+    out
+}
+
 /// A file from chunks, with valid checksums.
 fn signed(version: u32, parts: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
     let crc32 = backstep_core::crc32::crc32;
@@ -196,17 +215,55 @@ fn signed(version: u32, parts: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
 #[test]
 fn the_signing_helper_reproduces_the_writer() {
     let bytes = write(&sample());
-    assert_eq!(signed(2, &chunks(&bytes)), bytes);
+    assert_eq!(signed(3, &chunks(&bytes)), bytes);
+}
+
+#[test]
+fn version_2_recordings_without_floating_point_state_still_parse() {
+    let mut parts = chunks(&write(&sample()));
+    assert_eq!(&parts[4].0, b"FPUS");
+    parts.remove(4);
+    let v3_events = parts[3].1.clone();
+    parts[3].1 = irqs_v2(&v3_events);
+    let mut expected = sample();
+    expected.fp_start = FpState::default();
+    expected.fp_end = FpState::default();
+    for e in &mut expected.irqs {
+        e.fpccr = None;
+    }
+    assert_eq!(parse(&signed(2, &parts)), Ok(expected));
+    parts[3].1 = v3_events;
+    // A version 3 file must have FPUS.
+    assert!(matches!(
+        parse(&signed(3, &parts)),
+        Err(FormatError::Malformed(_))
+    ));
+    // FPUS has exactly two states, with a valid flag of 0 or 1.
+    let mut parts = chunks(&write(&sample()));
+    parts[4].1.truncate(4 * 37);
+    assert!(matches!(
+        parse(&signed(3, &parts)),
+        Err(FormatError::Malformed(_))
+    ));
+    let mut parts = chunks(&write(&sample()));
+    parts[4].1[0] = 2;
+    assert!(matches!(
+        parse(&signed(3, &parts)),
+        Err(FormatError::Malformed(_))
+    ));
 }
 
 #[test]
 fn version_1_recordings_without_interrupts_still_parse() {
     let mut parts = chunks(&write(&sample()));
     assert_eq!(&parts[3].0, b"IRQS");
+    parts.remove(4); // FPUS
     parts.remove(3);
     let mut expected = sample();
     expected.irqs.clear();
     expected.irq_stack_top = 0;
+    expected.fp_start = FpState::default();
+    expected.fp_end = FpState::default();
     assert_eq!(parse(&signed(1, &parts)), Ok(expected));
     // A version 2 file must have its IRQS chunk, and a version 1 file must
     // not have one.
@@ -214,8 +271,10 @@ fn version_1_recordings_without_interrupts_still_parse() {
         parse(&signed(2, &parts)),
         Err(FormatError::Malformed(_))
     ));
+    let mut v2 = chunks(&write(&sample()));
+    v2.remove(4);
     assert!(matches!(
-        parse(&signed(1, &chunks(&write(&sample())))),
+        parse(&signed(1, &v2)),
         Err(FormatError::Malformed(_))
     ));
 }
@@ -225,7 +284,7 @@ fn interrupt_recordings_that_lost_events_are_refused() {
     let mut parts = chunks(&write(&sample()));
     parts[3].1[4..8].copy_from_slice(&7u32.to_le_bytes()); // dropped
     assert_eq!(
-        parse(&signed(2, &parts)),
+        parse(&signed(3, &parts)),
         Err(FormatError::DroppedInterrupts(7))
     );
     assert!(FormatError::DroppedInterrupts(7).to_string().contains('7'));
@@ -233,7 +292,7 @@ fn interrupt_recordings_that_lost_events_are_refused() {
     let mut parts = chunks(&write(&sample()));
     parts[3].1[0..4].copy_from_slice(&4u32.to_le_bytes());
     assert!(matches!(
-        parse(&signed(2, &parts)),
+        parse(&signed(3, &parts)),
         Err(FormatError::Malformed(_))
     ));
 }

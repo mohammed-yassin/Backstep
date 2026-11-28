@@ -188,6 +188,10 @@ pub struct Cpu {
     fetch_fault: bool,
     /// The current instruction ran `ExecuteFPCheck()`.
     fp_checked: bool,
+    /// The state at the tail-chaining check of the exception return the
+    /// last instruction made, if it unstacked (see
+    /// [`Cpu::tail_chain_after_return`]).
+    last_return: Option<Box<exceptions::ReturnPoint>>,
 }
 
 /// External interrupts of a new [`Cpu`] (enough for every STM32F4; the
@@ -197,7 +201,7 @@ pub const DEFAULT_IRQS: usize = 96;
 type Exec = Result<(), Stop>;
 
 /// Everything `step` restores when an instruction stops.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct Registers {
     r: [u32; 16],
     flags: Flags,
@@ -242,6 +246,7 @@ impl Cpu {
             exc_return: None,
             fetch_fault: false,
             fp_checked: false,
+            last_return: None,
         }
     }
 
@@ -398,6 +403,7 @@ impl Cpu {
     pub fn step(&mut self, bus: &mut dyn Bus) -> Exec {
         let pc = self.r[15];
         self.exc_return = None;
+        self.last_return = None;
         self.fetch_fault = false;
         match self.execute(bus) {
             Ok(()) => {}

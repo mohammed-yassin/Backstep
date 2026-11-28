@@ -80,7 +80,8 @@ keeping one path for both is simpler.
   them replays with a detected divergence. *M3 decision:* replay reports
   such a load as unrecorded and stops (ADR 0008); capturing them with
   watchpoints remains open.
-- FPU registers are added with floating-point support (M7). PSP-based RTOS
+- FPU registers are recorded since M7 (`bs_snapshot_fp`, the FPUS chunk:
+  [ADR 0012](0012-floating-point.md)). PSP-based RTOS
   thread stacks are added with FreeRTOS support (M8).
 - When a debug probe is attached, a development-time snapshot can also be
   taken by halting the core and reading RAM over SWD, with no firmware

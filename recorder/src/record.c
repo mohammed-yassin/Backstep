@@ -4,6 +4,7 @@
  *
  * SPDX-License-Identifier: MIT
  */
+#include "bs_no_fpu.h"
 #include "backstep_record.h"
 
 #include "backstep.h"
@@ -17,6 +18,7 @@ static struct {
     struct bs_cpu_state start_cpu;
     struct bs_snapshot_header snap;
     struct bs_record_end_state end;
+    struct bs_fp_state fp[2]; /* at the start and at the end */
     uint32_t snap_bytes; /* RAM bytes copied into cfg.ram_buffer */
     uint32_t events;
     uint32_t dropped;
@@ -47,6 +49,7 @@ static void record_save(const struct bs_cpu_state *cpu)
     regions[1].address = (uint32_t)(uintptr_t)g_rec.cfg.stack_bottom;
     regions[1].length = span(g_rec.cfg.stack_bottom, g_rec.cfg.stack_top);
     bs_snapshot_header_build(&g_rec.snap, cpu, regions, 2u);
+    g_rec.fp[0] = bs_snapshot_fp;
     for (r = 0; r < 2u; ++r) {
         const uint8_t *src = (const uint8_t *)(uintptr_t)regions[r].address;
         if (regions[r].length > g_rec.cfg.ram_buffer_capacity - n) {
@@ -77,6 +80,7 @@ static void record_finish(const struct bs_cpu_state *cpu)
 
     bs_mmio_trap_disable();
     bs_irq_record_stop();
+    g_rec.fp[1] = bs_snapshot_fp;
     st = bs_mmio_trap_stats();
     g_rec.events = st->loads - st->dropped;
     g_rec.dropped = st->dropped;
@@ -195,7 +199,7 @@ uint32_t bs_record_write(void (*put)(const void *data, uint32_t len, void *ctx),
     header[0] = BS_REC_MAGIC;
     header[1] = BS_REC_VERSION;
     header[2] = sizeof header;
-    header[3] = 5u; /* chunks */
+    header[3] = 6u; /* chunks */
     emit(&w, header, sizeof header);
     target[0] = g_rec.cfg.target_id;
     target[1] = bs_crc32(g_rec.cfg.image_start, image_len);
@@ -216,6 +220,7 @@ uint32_t bs_record_write(void (*put)(const void *data, uint32_t len, void *ctx),
         chunk(&w, BS_REC_CHUNK_IRQS, irqs, sizeof irqs, g_rec.cfg.irq_log,
               g_rec.irq_events * (uint32_t)sizeof(struct bs_irq_event));
     }
+    chunk(&w, BS_REC_CHUNK_FPU, g_rec.fp, sizeof g_rec.fp, 0, 0u);
     chunk(&w, BS_REC_CHUNK_END, &g_rec.end, sizeof g_rec.end, 0, 0u);
     {
         uint32_t crc = w.file_crc;

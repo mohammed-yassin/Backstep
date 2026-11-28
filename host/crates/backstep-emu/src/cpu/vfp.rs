@@ -58,6 +58,9 @@ pub mod fpccr {
     /// The bits software can write (ASPEN, LSPEN, MONRDY, BFRDY, MMRDY,
     /// HFRDY, THREAD, USER, LSPACT).
     pub const WRITABLE: u32 = 0xC000_017B;
+    /// Every bit FPCCR can hold on this core (software-writable ones and
+    /// UFRDY, which only exception entry sets).
+    pub const WRITABLE_ALL: u32 = WRITABLE | UFRDY;
 }
 
 /// CPACR: the cp10 and cp11 fields (the only ones implemented).
@@ -162,6 +165,22 @@ impl Cpu {
         }
         self.fp_checked = true;
         Ok(())
+    }
+
+    /// What any floating-point instruction does before its own work: the
+    /// access check, lazy state preservation and a new context
+    /// (`ExecuteFPCheck()`). For replay, which must reproduce the effect
+    /// of the recorder's own FP instructions without running them.
+    ///
+    /// # Errors
+    /// [`Stop::NoCoprocessor`] if CPACR denies access; the others of
+    /// lazy preservation (see [`Cpu::step`]).
+    pub fn execute_fp_check(&mut self, bus: &mut dyn Bus) -> Exec {
+        let pc = self.r[15];
+        if !self.fp_enabled() {
+            return Err(Stop::NoCoprocessor { pc });
+        }
+        self.fp_context(bus, pc)
     }
 
     /// The rounding and flags of an operation under the current FPSCR.
