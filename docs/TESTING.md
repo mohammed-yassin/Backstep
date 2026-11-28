@@ -26,15 +26,15 @@ how, and how to run it.
 | Recorder unit tests (ASan + UBSan) | Recorder logic is correct and memory-safe | `recorder/tests/` |
 | Cross-language checks | C, Rust and Python `zlib` compute identical CRC-32 values | `recorder/tests/`, `crc32.rs`, `scripts/ci.sh` |
 | QEMU self-tests | Firmware startup, interrupts and recorder code run correctly on a Cortex-M4 | `firmware/targets/qemu-mps2-an386/`, `scripts/qemu-run.sh` |
-| QEMU board smoke tests | Nucleo firmware programs the right registers, and the Nucleo trap test runs end to end, before reaching hardware | `scripts/qemu-nucleo-smoke.sh`, `scripts/qemu-nucleo-trap-smoke.sh` |
+| QEMU board smoke tests | Nucleo firmware programs the right registers, and the Nucleo trap and exclusive-monitor tests run end to end, before reaching hardware | `scripts/qemu-nucleo-smoke.sh`, `scripts/qemu-nucleo-trap-smoke.sh`, `scripts/qemu-nucleo-excl-smoke.sh` |
 | Decoder vectors | The load/store decoder agrees with the GNU assembler on 1006 encodings; 2.6 M random encodings decode consistently | `recorder/tests/test_thumb_ldst.c`, `gen_ldst_vectors.py` |
 | MPU trap tests (QEMU) | Every load/store form, IT blocks, interrupts at both priorities, genuine-fault detection | `firmware/targets/qemu-mps2-an386/mmio_trap_test.c` |
 | Capture comparison | MPU trap and Clang pass capture byte-identical logs of the same workload | `scripts/capture-compare.sh` |
 | Interrupt positions | 14,000 recorded interrupt contexts match QEMU's per-instruction trace; the key is unique or provably safe | `scripts/irq-position-test.sh`, `scripts/irq-position-check.py` |
 | Snapshot restore | A snapshot restored into a fresh QEMU continues identically; leaving out any part changes the result | `scripts/snapshot-restore-test.sh`, `scripts/snapshot_tool.py` |
 | Interrupt recorder logic | Context fields, alignment padding, stack hash, preemption before the stub's first instruction | `recorder/tests/test_irq_record.c` |
-| Emulator differential test | Random Thumb programs: every register and xPSR identical to QEMU before every instruction; every instruction class executed | `scripts/emu-difftest.py` |
-| Emulator unit tests | Stop conditions, UNPREDICTABLE encodings, rollback on faults, ELF loading | `host/crates/backstep-emu` |
+| Emulator differential test | Random Thumb and Thumb-2 programs: every register and xPSR (flags, Q, GE, IT) identical to QEMU before every instruction; all 281 instruction classes executed | `scripts/emu-difftest.py` |
+| Emulator unit tests | Stop conditions, UNPREDICTABLE encodings, alignment faults, branch offsets beyond the test image, privilege, stack-pointer banking, exclusive-monitor failures, rollback on faults, ELF loading | `host/crates/backstep-emu` |
 | Hardware-in-the-loop | Real chip behaviour: clocks, timing, LED, replay vs real dumps | `scripts/hil/` |
 | HIL script self-tests | The hardware scripts give correct verdicts (simulated board) | `scripts/hil/test_hil_scripts.py` |
 

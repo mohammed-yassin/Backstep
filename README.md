@@ -6,8 +6,10 @@ did on the real chip, then replay that exact execution on your PC and step
 
 > **Status: pre-alpha.** Milestones M0 and M1 are done: the recorder can
 > capture peripheral reads, interrupt positions and a starting-state
-> snapshot, all verified on QEMU. The replay emulator (M2) is next. See the
-> [roadmap](docs/ROADMAP.md) for what works today and what comes next.
+> snapshot, all verified on QEMU. The replay emulator (M2) is in progress:
+> it executes every Thumb and Thumb-2 integer instruction identically to
+> QEMU; exceptions come next. See the [roadmap](docs/ROADMAP.md) for what
+> works today and what comes next.
 
 ---
 

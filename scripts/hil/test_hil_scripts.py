@@ -21,6 +21,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 M0 = HERE / "m0_nucleo_f411re.py"
 M1 = HERE / "m1_nucleo_f411re.py"
+M2 = HERE / "m2_nucleo_f411re.py"
 
 
 def fake_board(master_fd: int, lines: list[str], period_s: float) -> None:
@@ -86,6 +87,29 @@ def main() -> int:
         ("m1: silent board fails", [], 0.05, "", False),
     ]
     results += [run_case(*case, script=M1) for case in m1_cases]
+
+    m2_good = [
+        "BACKSTEP-M2 NUCLEO-F411RE exclusive monitor test",
+        "PASS ldrex A; strex A succeeds",
+        "PASS   ...and stores",
+        "PASS ldrex A; clrex; strex A fails",
+        "PASS   ...and does not store",
+        "MEASURE excl other_address status=0",
+        "MEASURE excl other_size status=0",
+        "MEASURE excl plain_store status=0",
+        "PASS PendSV taken between ldrex and strex",
+        "MEASURE excl exception status=1",
+        "RESULT PASS",
+    ]
+    m2_fail = [l.replace("PASS ldrex A; clrex", "FAIL ldrex A; clrex") for l in m2_good[:-1]] + ["RESULT FAIL"]
+    m2_missing = [l for l in m2_good if "plain_store" not in l]
+    m2_cases = [
+        ("m2: healthy board passes", m2_good, 0.05, "", True),
+        ("m2: failed required check fails", m2_fail, 0.05, "", False),
+        ("m2: missing measurement fails", m2_missing, 0.05, "", False),
+        ("m2: silent board fails", [], 0.05, "", False),
+    ]
+    results += [run_case(*case, script=M2) for case in m2_cases]
     print(f"hil script self-test: {sum(results)}/{len(results)} cases correct")
     return 0 if all(results) else 1
 

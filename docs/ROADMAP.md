@@ -14,7 +14,7 @@ Status legend: **Done** (merged, automated criteria met) ·
 |---|-----------|--------|
 | M0 | Foundation | Done (hardware check pending) |
 | M1 | Prototypes for the risky parts | Done (hardware check pending) |
-| M2 | Cortex-M4 emulator | In progress (16-bit Thumb done) |
+| M2 | Cortex-M4 emulator | In progress (16-bit Thumb and 32-bit Thumb-2 done) |
 | M3 | First recording and replay (no interrupts) | Planned |
 | M4 | Interrupts and faults | Planned |
 | M5 | GDB with step-back, v0.1 release | Planned |
@@ -81,8 +81,10 @@ identical continuation, every part shown necessary).
 instruction set, exception entry and return.
 
 **Progress:** part 1 (all 16-bit Thumb instructions, IT blocks, ELF
-loader) is verified against QEMU; see [ADR 0006](adr/0006-emulator.md).
-Part 2 adds 32-bit Thumb-2, part 3 exceptions.
+loader) and part 2 (all 32-bit Thumb-2 integer and DSP instructions,
+special registers, exclusives) are verified against QEMU; see
+[ADR 0006](adr/0006-emulator.md). Part 3 adds exceptions and the
+1,000,000-instruction run. Floating point follows in M7.
 
 **Acceptance criteria**
 - 1,000,000 random instruction sequences produce identical registers,

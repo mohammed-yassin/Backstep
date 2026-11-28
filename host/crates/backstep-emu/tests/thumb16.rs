@@ -155,18 +155,6 @@ fn pop_into_pc_is_rolled_back_on_a_bad_target() {
 }
 
 #[test]
-fn thirty_two_bit_instructions_are_reported_not_guessed() {
-    let mut cpu = cpu_with(&[0xF04F, 0x0001]); // mov.w r0, #1
-    assert_eq!(
-        cpu.step(&mut NoBus),
-        Err(Stop::Unimplemented {
-            pc: CODE,
-            insn: 0xF04F_0001
-        })
-    );
-}
-
-#[test]
 fn elf_loader_copies_load_segments_and_finds_entry() {
     // Hand-built ELF32 LE ARM: header (52 bytes), one PT_LOAD program
     // header (32 bytes) loading 4 bytes from offset 84 to 0x2000_0010.
