@@ -206,7 +206,10 @@ void bs_mmio_trap_hardfault(uint32_t *frame, uint32_t *callee)
 /*
  * Naked entry stubs: pick the stack that holds the exception frame, save
  * r4-r11 so the C handler can read and modify them, and restore them on
- * the way out.
+ * the way out. Before returning they zero BS_TRAP_STACK_BYTES below the
+ * handler's stack top: the capture then leaves exactly the exception frame
+ * and zeros in the dead stack, which replay reproduces (it does not run
+ * the capture), so replayed memory equals the chip's everywhere.
  */
 #define BS_FAULT_STUB(name, c_handler)                                       \
     __attribute__((naked)) void name(void)                                   \
@@ -219,8 +222,33 @@ void bs_mmio_trap_hardfault(uint32_t *frame, uint32_t *callee)
                          "sub sp, #4\n\t" /* keep 8-byte stack alignment */  \
                          "add r1, sp, #4\n\t"                                \
                          "bl " #c_handler "\n\t"                             \
+                         /* zero 480 bytes below the saved registers ... */  \
+                         "mov r0, sp\n\t"                                    \
+                         "sub r1, r0, #480\n\t"                              \
+                         "mov.w r4, #0\n\t"                                  \
+                         "mov.w r5, #0\n\t"                                  \
+                         "mov.w r6, #0\n\t"                                  \
+                         "mov.w r7, #0\n\t"                                  \
+                         "mov.w r8, #0\n\t"                                  \
+                         "mov.w r9, #0\n\t"                                  \
+                         "mov.w r10, #0\n\t"                                 \
+                         "mov.w r11, #0\n\t"                                 \
+                         "1: stmdb r0!, {r4-r11}\n\t"                        \
+                         "stmdb r0!, {r4-r11}\n\t"                           \
+                         "stmdb r0!, {r4-r11}\n\t"                           \
+                         "cmp r0, r1\n\t"                                    \
+                         "bne 1b\n\t"                                        \
                          "add sp, #4\n\t"                                    \
                          "pop {r4-r11, lr}\n\t"                              \
+                         /* ... and the 40 bytes they and the pad used */    \
+                         "mov r0, sp\n\t"                                    \
+                         "mov.w r1, #0\n\t"                                  \
+                         "mov.w r2, #0\n\t"                                  \
+                         "mov.w r3, #0\n\t"                                  \
+                         "mov.w r12, #0\n\t"                                 \
+                         "stmdb r0!, {r1-r3, r12}\n\t"                       \
+                         "stmdb r0!, {r1-r3, r12}\n\t"                       \
+                         "strd r1, r2, [r0, #-8]\n\t"                        \
                          "bx lr\n\t");                                       \
     }
 

@@ -12,6 +12,7 @@ Each entry has a script that prints a report block to paste below.
 | M1 | MPU trap on real STM32F411 registers: all load forms, stores, interrupts at priority 0x80 and 0, trapped console; cycles per trapped load (DWT) | `scripts/hil/m1_nucleo_f411re.py` | Pending |
 | M2 | Exclusive monitor: LDREX/STREX and CLREX behave as required; measure STREX to another address, of another size, after a plain store and after an exception | `scripts/hil/m2_nucleo_f411re.py` | Pending |
 | M3 | Record polling code reading real STM32F411 registers, send the recording over the UART, replay it on the PC: every load reproduced, end registers and RAM checksum equal | `scripts/hil/m3_nucleo_f411re.py` | Pending |
+| M4 | Nested interrupts from 3 sources at random rates recorded on the board, 20 of 20 runs replay exactly on the PC | added in M4 part 2 | Pending |
 
 ## M0: blinky on NUCLEO-F411RE
 

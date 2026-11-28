@@ -16,7 +16,7 @@ Status legend: **Done** (merged, automated criteria met) ·
 | M1 | Prototypes for the risky parts | Done (hardware check pending) |
 | M2 | Cortex-M4 emulator | Done (hardware measurement pending) |
 | M3 | First recording and replay (no interrupts) | Done (hardware check pending) |
-| M4 | Interrupts and faults | Planned |
+| M4 | Interrupts and faults | In progress (part 1, QEMU, done) |
 | M5 | GDB with step-back, v0.1 release | Planned |
 | M6 | "Who wrote this?" queries | Planned |
 | M7 | Real-world STM32 firmware (FPU, DMA, HAL) | Planned |
@@ -127,6 +127,19 @@ verified against QEMU; see [ADR 0006](adr/0006-emulator.md) and
   checksum equal the crash dump.
 
 ## M4: Interrupts and faults
+
+**Status: part 1 done; part 2 (the NUCLEO-F411RE test) next.**
+
+- Part 1: the recording format's version 2 adds the interrupt log (IRQS
+  chunk), and replay delivers every interrupt at its recorded position
+  ([ADR 0009](adr/0009-replaying-interrupts.md)). The recorder no longer
+  leaves traces in the program's stack that replay cannot reproduce.
+  `scripts/replay-irq-test.py` replays 100 of 100 QEMU runs exactly (41,616
+  interrupts, 1,814 nested), plus
+  10 crash recordings ended by a HardFault, and compares QEMU's trace
+  with the replay's state for state, handlers included.
+- Part 2: the same test on the NUCLEO-F411RE, over the UART, checked in
+  CI on QEMU's netduinoplus2.
 
 **Acceptance criteria**
 - Nested interrupts from 3 sources at random rates replay exactly in

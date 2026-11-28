@@ -50,6 +50,15 @@ __attribute__((naked)) int bs_snapshot_take(struct bs_cpu_state *cpu,
         "push {r0, lr}\n\t"
         "blx r12\n\t"
         "pop {r0, lr}\n\t"
+        /* Zero the dead stack save() used (BS_SNAPSHOT_SAVE_BYTES): a
+         * recording's snapshot stores zeros there, so replayed memory
+         * equals the chip's below SP too. */
+        "mov r3, sp\n\t"
+        "sub r1, r3, #1024\n\t"
+        "mov.w r2, #0\n\t"
+        "1: str r2, [r1], #4\n\t"
+        "cmp r1, r3\n\t"
+        "bne 1b\n\t"
         /* Return with a state that depends only on the snapshot, so a
          * recording replays from it exactly: the caller's flags (and GE)
          * as at the call, the scratch registers r1-r3 and r12 zero. */

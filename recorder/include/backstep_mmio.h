@@ -32,6 +32,13 @@
 extern "C" {
 #endif
 
+/* Dead stack the capture handler zeroes below its stack top (the exception
+ * frame, or MSP when the frame is on PSP) before returning; replay writes
+ * the same zeros. It must cover the stack the capture code uses (checked
+ * by scripts/check-stack-usage.py). The stub stores 480 bytes below its
+ * saved registers, then the 40 bytes of those and the alignment pad. */
+#define BS_TRAP_STACK_BYTES 520u
+
 #define BS_MMIO_REGION_BASE 0x40000000u
 #define BS_MMIO_REGION_SIZE 0x20000000u
 

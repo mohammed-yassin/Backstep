@@ -33,6 +33,8 @@ run_recorder() {
 run_firmware() {
     step "Firmware: build all targets (warnings are errors)"
     make -C firmware clean all
+    step "Recorder: capture code fits in the dead stack it zeroes (-O0, -O2, -Os)"
+    python3 scripts/check-stack-usage.py
     step "Firmware: QEMU mps2-an386 tests (self-test, MPU trap, genuine-fault mode)"
     make -C firmware qemu-test
     step "Firmware: MPU trap vs Clang pass capture comparison"
@@ -67,6 +69,8 @@ run_firmware() {
     step "Replay: 10 recorded polling programs replayed instruction for instruction vs QEMU; corrupted recordings detected"
     (cd host && cargo build --locked --release -p backstep-cli)
     make -C firmware replay-test
+    step "Replay: nested interrupts from 3 sources at random rates, 100 of 100 QEMU runs replay exactly; crashes; traces vs QEMU; corrupted IRQS detected"
+    make -C firmware replay-irq-test
     step "Replay: NUCLEO-F411RE image records itself on QEMU netduinoplus2, sends the recording over USART2, replays identically"
     python3 scripts/qemu-nucleo-replay-smoke.py --backstep host/target/release/backstep \
         --elf firmware/build/nucleo-f411re/record_hw.elf

@@ -3,7 +3,8 @@
 //! replay half is tested end to end by scripts/replay-test.py).
 
 use backstep_replay::recording::{
-    parse, write, CpuState, EndState, FormatError, MmioEvent, Recording, Region, ScsState, Snapshot,
+    parse, write, CpuState, EndState, FormatError, IrqEvent, MmioEvent, Recording, Region,
+    ScsState, Snapshot,
 };
 
 fn sample() -> Recording {
@@ -55,6 +56,19 @@ fn sample() -> Recording {
             })
             .collect(),
         dropped: 0,
+        irqs: (0..3u32)
+            .map(|i| IrqEvent {
+                exception: 15 + 9 * i,
+                r: [i; 13],
+                sp: 0x2000_0F00 - 32 * i,
+                lr: 0xFFFF_FFF9,
+                pc: 0x300 + 4 * i,
+                xpsr: 0x0100_0000 | i,
+                mmio_index: 2 * i,
+                stack_hash: 0xABCD_0000 + i,
+            })
+            .collect(),
+        irq_stack_top: 0x2000_1000,
         end: EndState {
             cpu,
             ram_crc32: 0x1234_5678,
@@ -102,8 +116,8 @@ fn unusable_recordings_say_why() {
     rec.dropped = 3;
     assert_eq!(parse(&write(&rec)), Err(FormatError::Dropped(3)));
     let mut bytes = write(&sample());
-    bytes[4] = 2; // version
-    assert_eq!(parse(&bytes), Err(FormatError::UnsupportedVersion(2)));
+    bytes[4] = 3; // version
+    assert_eq!(parse(&bytes), Err(FormatError::UnsupportedVersion(3)));
     assert_eq!(parse(b"ELF\x7f....."), Err(FormatError::BadMagic));
     // A snapshot whose region CRC does not match (written consistently
     // otherwise) is caught by the snapshot's own checksum.
@@ -142,4 +156,84 @@ fn unusable_recordings_say_why() {
     ] {
         assert_ne!(e.to_string(), "");
     }
+}
+
+/// The chunks of a well-formed file: (type, payload).
+fn chunks(bytes: &[u8]) -> Vec<([u8; 4], Vec<u8>)> {
+    let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+    let mut out = Vec::new();
+    let mut pos = 16;
+    for _ in 0..word(12) {
+        let len = word(pos + 4);
+        out.push((
+            bytes[pos..pos + 4].try_into().unwrap(),
+            bytes[pos + 8..pos + 8 + len].to_vec(),
+        ));
+        pos += 12 + len;
+    }
+    out
+}
+
+/// A file from chunks, with valid checksums.
+fn signed(version: u32, parts: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
+    let crc32 = backstep_core::crc32::crc32;
+    let mut out = Vec::new();
+    let count = u32::try_from(parts.len()).unwrap();
+    for w in [0x4352_5342u32, version, 16, count] {
+        out.extend_from_slice(&w.to_le_bytes());
+    }
+    for (kind, payload) in parts {
+        out.extend_from_slice(kind);
+        out.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
+        out.extend_from_slice(payload);
+        out.extend_from_slice(&crc32(payload).to_le_bytes());
+    }
+    let file = crc32(&out);
+    out.extend_from_slice(&file.to_le_bytes());
+    out
+}
+
+#[test]
+fn the_signing_helper_reproduces_the_writer() {
+    let bytes = write(&sample());
+    assert_eq!(signed(2, &chunks(&bytes)), bytes);
+}
+
+#[test]
+fn version_1_recordings_without_interrupts_still_parse() {
+    let mut parts = chunks(&write(&sample()));
+    assert_eq!(&parts[3].0, b"IRQS");
+    parts.remove(3);
+    let mut expected = sample();
+    expected.irqs.clear();
+    expected.irq_stack_top = 0;
+    assert_eq!(parse(&signed(1, &parts)), Ok(expected));
+    // A version 2 file must have its IRQS chunk, and a version 1 file must
+    // not have one.
+    assert!(matches!(
+        parse(&signed(2, &parts)),
+        Err(FormatError::Malformed(_))
+    ));
+    assert!(matches!(
+        parse(&signed(1, &chunks(&write(&sample())))),
+        Err(FormatError::Malformed(_))
+    ));
+}
+
+#[test]
+fn interrupt_recordings_that_lost_events_are_refused() {
+    let mut parts = chunks(&write(&sample()));
+    parts[3].1[4..8].copy_from_slice(&7u32.to_le_bytes()); // dropped
+    assert_eq!(
+        parse(&signed(2, &parts)),
+        Err(FormatError::DroppedInterrupts(7))
+    );
+    assert!(FormatError::DroppedInterrupts(7).to_string().contains('7'));
+    // An event count that disagrees with the chunk size is malformed.
+    let mut parts = chunks(&write(&sample()));
+    parts[3].1[0..4].copy_from_slice(&4u32.to_le_bytes());
+    assert!(matches!(
+        parse(&signed(2, &parts)),
+        Err(FormatError::Malformed(_))
+    ));
 }

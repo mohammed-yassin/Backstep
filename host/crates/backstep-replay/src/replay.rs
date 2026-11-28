@@ -8,7 +8,7 @@ use backstep_emu::elf::Elf;
 use backstep_emu::memory::{Bus, Fault};
 use backstep_emu::{Cpu, Memory, Scs, Stop};
 
-use crate::recording::{CpuState, MmioEvent, Recording};
+use crate::recording::{CpuState, IrqEvent, MmioEvent, Recording};
 use crate::target::{self, Target};
 
 /// The peripheral region the recorder captures (ADR 0003).
@@ -45,6 +45,8 @@ pub struct Report {
     pub loads: usize,
     /// Peripheral stores (not recorded; replay ignores them).
     pub stores: u64,
+    /// Interrupts delivered at their recorded positions (all of them).
+    pub interrupts: usize,
     /// CRC-32 of the end RAM regions (equal to the recording's).
     pub ram_crc32: u32,
 }
@@ -81,8 +83,10 @@ pub enum ReplayError {
         /// (pc, address, size).
         actual: (u32, u32, u8),
     },
-    /// A load from an address the recorder does not capture (PPB, e.g.
-    /// SysTick or DWT), whose value replay cannot know.
+    /// A load the recorder does not capture, whose value replay cannot
+    /// know: from the PPB (e.g. SysTick or DWT), or from a peripheral at
+    /// execution priority -1 or -2 (`HardFault`, NMI, FAULTMASK), where the
+    /// MPU does not trap.
     UnrecordedLoad {
         /// Instructions executed before it.
         instruction: u64,
@@ -98,6 +102,26 @@ pub enum ReplayError {
     },
     /// The end point was not reached.
     InstructionLimit(u64),
+    /// A recorded interrupt's position was reached but the emulated core
+    /// could not take it (masked, or not the most urgent pending one).
+    InterruptNotTaken {
+        /// Instructions executed before it.
+        instruction: u64,
+        /// Index of the recorded interrupt.
+        index: usize,
+        /// The exception number.
+        exception: u32,
+    },
+    /// The end point was reached with recorded interrupts not delivered:
+    /// their positions were never reached.
+    InterruptsLeft {
+        /// Interrupts delivered.
+        delivered: usize,
+        /// Interrupts recorded.
+        recorded: usize,
+        /// The first one not delivered.
+        next: IrqEvent,
+    },
     /// The end point was reached with recorded loads left over.
     LoadsLeft {
         /// Loads replayed.
@@ -154,7 +178,8 @@ impl fmt::Display for ReplayError {
                 actual,
             } => write!(
                 f,
-                "at instruction {instruction}: {} is not recorded (not a captured peripheral)",
+                "at instruction {instruction}: {} is not recorded (not a captured \
+                 peripheral, or made at priority -1 or -2, which the MPU does not trap)",
                 access(*actual)
             ),
             ReplayError::Stopped { instruction, stop } => {
@@ -163,6 +188,23 @@ impl fmt::Display for ReplayError {
             ReplayError::InstructionLimit(n) => {
                 write!(f, "the end of the recording was not reached in {n} instructions")
             }
+            ReplayError::InterruptNotTaken {
+                instruction,
+                index,
+                exception,
+            } => write!(
+                f,
+                "diverged at instruction {instruction}: recorded interrupt #{index} (exception {exception}) cannot be taken there"
+            ),
+            ReplayError::InterruptsLeft {
+                delivered,
+                recorded,
+                next,
+            } => write!(
+                f,
+                "diverged: the end was reached after {delivered} of {recorded} recorded interrupts; the position of the next (exception {}, pc {:#010x}) was never reached",
+                next.exception, next.pc
+            ),
             ReplayError::LoadsLeft { replayed, recorded } => write!(
                 f,
                 "diverged: the end was reached after {replayed} of {recorded} recorded loads"
@@ -188,7 +230,39 @@ struct ReplayBus<'a> {
     pc: u32,
     instruction: u64,
     stores: u64,
+    /// Peripheral accesses made by the current instruction.
+    accesses: u32,
+    /// Whether the MPU traps accesses at the current execution priority.
+    trapped: bool,
     error: Option<ReplayError>,
+}
+
+/// Dead stack the capture handler zeroes below its stack top
+/// (`BS_TRAP_STACK_BYTES` in `backstep_mmio.h`).
+const TRAP_STACK_BYTES: u32 = 520;
+
+/// On the chip every peripheral access raised the capture's MemManage (or
+/// HardFault) exception, which leaves its exception frame below SP, with
+/// the registers as they are after the access, and zeros below that.
+/// Replay does not run the capture, so it writes the same bytes: replayed
+/// memory then equals the chip's, dead stack included, which interrupt
+/// positions (their stack hash) depend on.
+fn leave_trap_frame(cpu: &mut Cpu, frame_on_psp: bool) {
+    let sp = cpu.r[13];
+    let realign = cpu.scs.ccr & (1 << 9) != 0 && sp & 4 != 0;
+    let frame = sp.wrapping_sub(0x20) & !(u32::from(realign) << 2);
+    let xpsr = cpu.xpsr() | (u32::from(realign) << 9);
+    let words = [
+        cpu.r[0], cpu.r[1], cpu.r[2], cpu.r[3], cpu.r[12], cpu.r[14], cpu.r[15], xpsr,
+    ];
+    for (i, w) in words.iter().enumerate() {
+        cpu.memory.write(frame.wrapping_add(4 * i as u32), 4, *w);
+    }
+    let top = if frame_on_psp { cpu.msp() } else { frame };
+    for i in 0..TRAP_STACK_BYTES / 4 {
+        cpu.memory
+            .write(top.wrapping_sub(TRAP_STACK_BYTES).wrapping_add(4 * i), 4, 0);
+    }
 }
 
 impl Bus for ReplayBus<'_> {
@@ -199,8 +273,9 @@ impl Bus for ReplayBus<'_> {
             write: false,
         };
         let actual = (self.pc, address, size);
-        if !PERIPHERALS.contains(&address) {
-            if PPB.contains(&address) {
+        let peripheral = PERIPHERALS.contains(&address);
+        if !peripheral || !self.trapped {
+            if PPB.contains(&address) || peripheral {
                 self.error = Some(ReplayError::UnrecordedLoad {
                     instruction: self.instruction,
                     actual,
@@ -208,6 +283,7 @@ impl Bus for ReplayBus<'_> {
             }
             return Err(fault);
         }
+        self.accesses += 1;
         match self.events.get(self.next) {
             Some(e) if (e.pc, e.address, e.size) == actual => {
                 self.next += 1;
@@ -233,8 +309,13 @@ impl Bus for ReplayBus<'_> {
     }
 
     fn write(&mut self, address: u32, size: u8, _value: u32) -> Result<(), Fault> {
-        if PERIPHERALS.contains(&address) || PPB.contains(&address) {
+        if PERIPHERALS.contains(&address) {
+            // Stores are not recorded (replay does not need their effect);
+            // a trapped one still ran the capture handler on the chip.
             self.stores += 1;
+            self.accesses += u32::from(self.trapped);
+            Ok(())
+        } else if PPB.contains(&address) {
             Ok(())
         } else {
             Err(Fault {
@@ -346,6 +427,28 @@ fn restore(cpu: &mut Cpu, rec: &Recording) {
     }
 }
 
+/// `bs_stack_hash` of the stack above `sp` (at most 128 bytes, not past
+/// `top`), as the recorder computes it for an interrupt key.
+fn stack_hash(cpu: &Cpu, sp: u32, top: u32) -> u32 {
+    let words = (top.saturating_sub(sp) / 4).min(32);
+    (0..words).fold(0x811C_9DC5u32, |h, i| {
+        let w = cpu.memory.read(sp.wrapping_add(4 * i), 4).unwrap_or(0);
+        (h ^ w).wrapping_mul(0x0100_0193)
+    })
+}
+
+/// Whether the core is at the position where interrupt `e` arrived:
+/// same resume PC, registers, xPSR, peripheral-read count and stack.
+fn at_position(cpu: &Cpu, e: &IrqEvent, loads: usize, stack_top: u32) -> bool {
+    cpu.r[15] == e.pc
+        && cpu.r[..13] == e.r
+        && cpu.r[13] == e.sp
+        && cpu.r[14] == e.lr
+        && cpu.xpsr() == e.xpsr
+        && loads == e.mmio_index as usize
+        && stack_hash(cpu, e.sp, stack_top) == e.stack_hash
+}
+
 /// The registers compared at the end: those the recorder captures (r4-r11,
 /// SP, LR, flags and GE, and the special registers).
 fn compare_end(cpu: &Cpu, end: &CpuState) -> Result<(), ReplayError> {
@@ -378,6 +481,74 @@ fn compare_end(cpu: &Cpu, end: &CpuState) -> Result<(), ReplayError> {
     mismatch("control", end.control & 3, cpu.control & 3)
 }
 
+/// Deliver every recorded interrupt whose position the core is at (more
+/// than one when an interrupt preempted another's first instruction).
+fn deliver_interrupts(
+    cpu: &mut Cpu,
+    bus: &mut ReplayBus<'_>,
+    rec: &Recording,
+    next_irq: &mut usize,
+    exceptions: usize,
+) -> Result<(), ReplayError> {
+    while let Some(e) = rec.irqs.get(*next_irq) {
+        if !at_position(cpu, e, bus.next, rec.irq_stack_top) {
+            break;
+        }
+        let number = e.exception as usize;
+        let taken = number >= 2
+            && number < exceptions
+            && cpu
+                .interrupt_now(bus, number)
+                .map_err(|stop| ReplayError::Stopped {
+                    instruction: bus.instruction,
+                    stop,
+                })?;
+        if !taken {
+            return Err(ReplayError::InterruptNotTaken {
+                instruction: bus.instruction,
+                index: *next_irq,
+                exception: e.exception,
+            });
+        }
+        *next_irq += 1;
+    }
+    Ok(())
+}
+
+/// At the end point: everything recorded was replayed, and the registers
+/// and RAM checksum are the recorded ones. Returns the RAM checksum.
+fn check_end(cpu: &Cpu, rec: &Recording, loads: usize, irqs: usize) -> Result<u32, ReplayError> {
+    if irqs != rec.irqs.len() {
+        return Err(ReplayError::InterruptsLeft {
+            delivered: irqs,
+            recorded: rec.irqs.len(),
+            next: rec.irqs[irqs],
+        });
+    }
+    if loads != rec.events.len() {
+        return Err(ReplayError::LoadsLeft {
+            replayed: loads,
+            recorded: rec.events.len(),
+        });
+    }
+    compare_end(cpu, &rec.end.cpu)?;
+    let mut crc = 0;
+    for &(address, len) in &rec.end.regions {
+        let bytes: Vec<u8> = (0..len)
+            .map(|i| cpu.memory.read(address.wrapping_add(i), 1).unwrap_or(0) as u8)
+            .collect();
+        crc = update(crc, &bytes);
+    }
+    if crc != rec.end.ram_crc32 {
+        return Err(ReplayError::EndMismatch {
+            what: "the RAM checksum".into(),
+            recorded: rec.end.ram_crc32,
+            replayed: crc,
+        });
+    }
+    Ok(crc)
+}
+
 /// Replay `rec` on the firmware `elf`.
 ///
 /// The recording ends at the entry of `bs_snapshot_take` called from
@@ -398,10 +569,16 @@ pub fn replay(elf: &Elf, rec: &Recording, mut opts: Options<'_>) -> Result<Repor
         pc: 0,
         instruction: 0,
         stores: 0,
+        accesses: 0,
+        trapped: true,
         error: None,
     };
     let mut n = 0u64;
+    let mut next_irq = 0usize;
+    let exceptions = 16 + target.num_irqs;
     loop {
+        bus.instruction = n;
+        deliver_interrupts(&mut cpu, &mut bus, rec, &mut next_irq, exceptions)?;
         if let Some(out) = opts.trace.as_deref_mut() {
             write_state(&cpu, out).map_err(|e| ReplayError::Elf(format!("trace: {e}")))?;
         }
@@ -413,6 +590,11 @@ pub fn replay(elf: &Elf, rec: &Recording, mut opts: Options<'_>) -> Result<Repor
         }
         bus.pc = cpu.r[15];
         bus.instruction = n;
+        bus.accesses = 0;
+        // Accesses at priority -1 or -2 (HardFault, NMI) bypass the MPU, so
+        // the capture did not see them.
+        bus.trapped = cpu.execution_priority() >= 0;
+        let frame_on_psp = cpu.ipsr == 0 && cpu.control & 2 != 0;
         let result = cpu.step(&mut bus);
         if let Some(e) = bus.error.take() {
             return Err(e);
@@ -423,34 +605,99 @@ pub fn replay(elf: &Elf, rec: &Recording, mut opts: Options<'_>) -> Result<Repor
                 stop,
             });
         }
+        if bus.accesses > 0 {
+            leave_trap_frame(&mut cpu, frame_on_psp);
+        }
         n += 1;
     }
-    if bus.next != rec.events.len() {
-        return Err(ReplayError::LoadsLeft {
-            replayed: bus.next,
-            recorded: rec.events.len(),
-        });
-    }
-    compare_end(&cpu, &rec.end.cpu)?;
-    let mut crc = 0;
-    for &(address, len) in &rec.end.regions {
-        let bytes: Vec<u8> = (0..len)
-            .map(|i| cpu.memory.read(address.wrapping_add(i), 1).unwrap_or(0) as u8)
-            .collect();
-        crc = update(crc, &bytes);
-    }
-    if crc != rec.end.ram_crc32 {
-        return Err(ReplayError::EndMismatch {
-            what: "the RAM checksum".into(),
-            recorded: rec.end.ram_crc32,
-            replayed: crc,
-        });
-    }
+    let crc = check_end(&cpu, rec, bus.next, next_irq)?;
     Ok(Report {
         target,
         instructions: n,
         loads: bus.next,
         stores: bus.stores,
+        interrupts: next_irq,
         ram_crc32: crc,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cpu() -> Cpu {
+        let mut memory = Memory::new();
+        memory.add_region(0x2000_0000, 0x1000, true);
+        let mut cpu = Cpu::new(memory);
+        for (i, r) in cpu.r.iter_mut().enumerate() {
+            *r = 0x100 + i as u32;
+        }
+        cpu.r[15] = 0x0000_0222;
+        for i in 0..0x400 {
+            cpu.memory.write(0x2000_0000 + 4 * i, 4, 0xDEAD_BEEF);
+        }
+        cpu
+    }
+
+    fn word(cpu: &Cpu, address: u32) -> u32 {
+        cpu.memory.read(address, 4).unwrap()
+    }
+
+    #[test]
+    fn the_trap_frame_is_the_chips_exception_frame() {
+        // SP 8-byte aligned: the frame sits right below it.
+        let mut c = cpu();
+        c.r[13] = 0x2000_0F00;
+        let xpsr = c.xpsr();
+        leave_trap_frame(&mut c, false);
+        let f = 0x2000_0F00 - 32;
+        let want = [0x100, 0x101, 0x102, 0x103, 0x10C, 0x10E, 0x222, xpsr];
+        for (i, w) in want.iter().enumerate() {
+            assert_eq!(word(&c, f + 4 * i as u32), *w, "frame word {i}");
+        }
+        // The handler's dead stack below the frame is zero, and nothing
+        // below that or above SP changed.
+        for a in (f - TRAP_STACK_BYTES..f).step_by(4) {
+            assert_eq!(word(&c, a), 0, "{a:#x}");
+        }
+        assert_eq!(word(&c, f - TRAP_STACK_BYTES - 4), 0xDEAD_BEEF);
+        assert_eq!(word(&c, 0x2000_0F00), 0xDEAD_BEEF);
+        assert_eq!(c.r[13], 0x2000_0F00, "SP is not changed");
+    }
+
+    #[test]
+    fn a_misaligned_sp_gets_the_padding_word_and_bit_9() {
+        let mut c = cpu();
+        c.r[13] = 0x2000_0F04;
+        leave_trap_frame(&mut c, false);
+        let f = 0x2000_0F04 - 36;
+        assert_eq!(word(&c, f + 24), 0x222);
+        assert_eq!(word(&c, f + 28) & (1 << 9), 1 << 9);
+        assert_eq!(
+            word(&c, f + 32),
+            0xDEAD_BEEF,
+            "the padding word keeps its value"
+        );
+        // Without STKALIGN there is no realignment.
+        let mut c = cpu();
+        c.scs.ccr = 0;
+        c.r[13] = 0x2000_0F04;
+        leave_trap_frame(&mut c, false);
+        assert_eq!(word(&c, 0x2000_0F04 - 32 + 24), 0x222);
+        assert_eq!(word(&c, 0x2000_0F04 - 32 + 28) & (1 << 9), 0);
+    }
+
+    #[test]
+    fn on_the_process_stack_the_handler_zeroes_below_msp() {
+        let mut c = cpu();
+        c.r[13] = 0x2000_0800; // PSP, the current SP in thread mode
+        c.control = 2;
+        c.sp_banked = 0x2000_0F00; // MSP
+        leave_trap_frame(&mut c, true);
+        assert_eq!(word(&c, 0x2000_0800 - 32 + 24), 0x222);
+        assert_eq!(word(&c, 0x2000_0F00 - 4), 0);
+        assert_eq!(word(&c, 0x2000_0F00 - TRAP_STACK_BYTES), 0);
+        assert_eq!(word(&c, 0x2000_0F00 - TRAP_STACK_BYTES - 4), 0xDEAD_BEEF);
+        assert_eq!(word(&c, 0x2000_0800 - 36), 0xDEAD_BEEF);
+    }
 }

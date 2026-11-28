@@ -89,7 +89,7 @@ def compare_traces(qemu_log: Path, replay_trace: Path, stop_pc: int) -> str | No
 
 def chunks(data: bytes) -> list[tuple[bytes, bytearray]]:
     out, pos = [], 16
-    for _ in range(4):
+    for _ in range(struct.unpack_from("<I", data, 12)[0]):
         kind = data[pos:pos + 4]
         (length,) = struct.unpack_from("<I", data, pos + 4)
         out.append((kind, bytearray(data[pos + 8:pos + 8 + length])))
@@ -98,7 +98,8 @@ def chunks(data: bytes) -> list[tuple[bytes, bytearray]]:
 
 
 def sign(parts: list[tuple[bytes, bytearray]]) -> bytes:
-    body = bytearray(struct.pack("<4I", 0x43525342, 1, 16, 4))
+    version = 2 if any(kind == b"IRQS" for kind, _ in parts) else 1
+    body = bytearray(struct.pack("<4I", 0x43525342, version, 16, len(parts)))
     for kind, payload in parts:
         body += kind + struct.pack("<I", len(payload)) + payload + struct.pack("<I", zlib.crc32(payload))
     return bytes(body + struct.pack("<I", zlib.crc32(body)))

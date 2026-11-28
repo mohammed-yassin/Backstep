@@ -29,6 +29,9 @@ extern "C" {
 #define BS_SNAPSHOT_MAGIC 0x504E5342u /* "BSNP" little-endian */
 #define BS_SNAPSHOT_VERSION 1u
 #define BS_SNAPSHOT_MAX_REGIONS 4u
+/* Dead stack below the caller's SP that bs_snapshot_take() zeroes after
+ * save() returns (save() must use no more). */
+#define BS_SNAPSHOT_SAVE_BYTES 1024u
 
 /* CPU state at the return from bs_snapshot_capture(). Field order is part
  * of the file format. */

@@ -11,7 +11,9 @@
 //!
 //! Chunks, in this order: `TGTD` (target and firmware identity), `SNAP`
 //! (the starting-state snapshot of ADR 0005), `MMIO` (the peripheral
-//! loads), `END ` (the state replay must reach).
+//! loads), `IRQS` (where each interrupt arrived, ADR 0004; version 2 only),
+//! `END ` (the state replay must reach). Version 1 files (no `IRQS`) are
+//! still read.
 
 use std::fmt;
 
@@ -19,8 +21,9 @@ use backstep_core::crc32::{crc32, update};
 
 /// "BSRC".
 pub const MAGIC: u32 = 0x4352_5342;
-/// The format version this code reads and writes.
-pub const VERSION: u32 = 1;
+/// The format version this code writes (it also reads version 1).
+pub const VERSION: u32 = 2;
+const IRQ_EVENT_WORDS: usize = 20;
 const SNAPSHOT_MAGIC: u32 = 0x504E_5342; // "BSNP"
 const SNAPSHOT_HEADER_BYTES: usize = 524;
 const CPU_WORDS: usize = 23;
@@ -33,6 +36,8 @@ pub mod chunk {
     pub const SNAPSHOT: [u8; 4] = *b"SNAP";
     /// Peripheral loads.
     pub const MMIO: [u8; 4] = *b"MMIO";
+    /// Interrupt positions (version 2).
+    pub const IRQS: [u8; 4] = *b"IRQS";
     /// End state.
     pub const END: [u8; 4] = *b"END ";
 }
@@ -160,6 +165,60 @@ pub struct MmioEvent {
     pub size: u8,
 }
 
+/// Where an interrupt arrived (`struct bs_irq_event`): the state of the
+/// interrupted context, which replay must reach before entering it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IrqEvent {
+    /// Exception number entered.
+    pub exception: u32,
+    /// r0-r12 of the interrupted context.
+    pub r: [u32; 13],
+    /// SP of the interrupted context.
+    pub sp: u32,
+    /// LR of the interrupted context.
+    pub lr: u32,
+    /// Where the interrupted context resumes.
+    pub pc: u32,
+    /// xPSR of the interrupted context.
+    pub xpsr: u32,
+    /// Peripheral loads made before this point.
+    pub mmio_index: u32,
+    /// FNV-1a hash of up to 128 bytes of stack above SP.
+    pub stack_hash: u32,
+}
+
+impl IrqEvent {
+    fn words(&self) -> [u32; IRQ_EVENT_WORDS] {
+        let mut w = [0u32; IRQ_EVENT_WORDS];
+        w[0] = self.exception;
+        w[1..14].copy_from_slice(&self.r);
+        w[14..].copy_from_slice(&[
+            self.sp,
+            self.lr,
+            self.pc,
+            self.xpsr,
+            self.mmio_index,
+            self.stack_hash,
+        ]);
+        w
+    }
+
+    fn from_words(w: &[u32]) -> Self {
+        let mut r = [0u32; 13];
+        r.copy_from_slice(&w[1..14]);
+        IrqEvent {
+            exception: w[0],
+            r,
+            sp: w[14],
+            lr: w[15],
+            pc: w[16],
+            xpsr: w[17],
+            mmio_index: w[18],
+            stack_hash: w[19],
+        }
+    }
+}
+
 /// The state at the end of the recording.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EndState {
@@ -188,6 +247,10 @@ pub struct Recording {
     pub events: Vec<MmioEvent>,
     /// Loads the recorder could not store (a usable recording has 0).
     pub dropped: u32,
+    /// Interrupt positions, in the order the interrupts were entered.
+    pub irqs: Vec<IrqEvent>,
+    /// Top of the stack, the limit of the interrupt keys' stack hash.
+    pub irq_stack_top: u32,
     /// The state replay must reach.
     pub end: EndState,
 }
@@ -211,6 +274,8 @@ pub enum FormatError {
     Malformed(String),
     /// The recorder lost loads (its log was full).
     Dropped(u32),
+    /// The recorder lost interrupt positions (its log was full).
+    DroppedInterrupts(u32),
 }
 
 impl fmt::Display for FormatError {
@@ -229,6 +294,12 @@ impl fmt::Display for FormatError {
                 write!(
                     f,
                     "the recorder dropped {n} peripheral loads (log too small)"
+                )
+            }
+            FormatError::DroppedInterrupts(n) => {
+                write!(
+                    f,
+                    "the recorder dropped {n} interrupt positions (log too small)"
                 )
             }
         }
@@ -292,7 +363,7 @@ pub fn parse(data: &[u8]) -> Result<Recording, FormatError> {
         return Err(FormatError::BadMagic);
     }
     let version = r.u32()?;
-    if version != VERSION {
+    if version != 1 && version != VERSION {
         return Err(FormatError::UnsupportedVersion(version));
     }
     let trailer = u32::from_le_bytes([
@@ -304,11 +375,22 @@ pub fn parse(data: &[u8]) -> Result<Recording, FormatError> {
     if crc32(body) != trailer {
         return Err(FormatError::FileChecksum);
     }
-    if r.u32()? != 16 || r.u32()? != 4 {
+    let order: &[[u8; 4]] = if version == 1 {
+        &[chunk::TARGET, chunk::SNAPSHOT, chunk::MMIO, chunk::END]
+    } else {
+        &[
+            chunk::TARGET,
+            chunk::SNAPSHOT,
+            chunk::MMIO,
+            chunk::IRQS,
+            chunk::END,
+        ]
+    };
+    if r.u32()? != 16 || r.u32()? as usize != order.len() {
         return Err(malformed("header"));
     }
     let mut payloads = Vec::new();
-    for expected in [chunk::TARGET, chunk::SNAPSHOT, chunk::MMIO, chunk::END] {
+    for &expected in order {
         let t = r.bytes(4)?;
         let t = [t[0], t[1], t[2], t[3]];
         if t != expected {
@@ -344,7 +426,15 @@ pub fn parse(data: &[u8]) -> Result<Recording, FormatError> {
     if dropped != 0 {
         return Err(FormatError::Dropped(dropped));
     }
-    let end = parse_end(payloads[3])?;
+    let (irqs, irq_dropped, irq_stack_top) = if version == 1 {
+        (Vec::new(), 0, 0)
+    } else {
+        parse_irqs(payloads[3])?
+    };
+    if irq_dropped != 0 {
+        return Err(FormatError::DroppedInterrupts(irq_dropped));
+    }
+    let end = parse_end(payloads[payloads.len() - 1])?;
     Ok(Recording {
         target_id: target[0],
         image_crc32: target[1],
@@ -353,8 +443,25 @@ pub fn parse(data: &[u8]) -> Result<Recording, FormatError> {
         snapshot,
         events,
         dropped,
+        irqs,
+        irq_stack_top,
         end,
     })
+}
+
+fn parse_irqs(p: &[u8]) -> Result<(Vec<IrqEvent>, u32, u32), FormatError> {
+    let w = words(p);
+    if w.len() < 3
+        || (w.len() - 3) % IRQ_EVENT_WORDS != 0
+        || (w.len() - 3) / IRQ_EVENT_WORDS != w[0] as usize
+    {
+        return Err(malformed("IRQS size does not match its count"));
+    }
+    let events = w[3..]
+        .chunks_exact(IRQ_EVENT_WORDS)
+        .map(IrqEvent::from_words)
+        .collect();
+    Ok((events, w[1], w[2]))
 }
 
 fn parse_snapshot(p: &[u8]) -> Result<Snapshot, FormatError> {
@@ -475,7 +582,7 @@ fn push_chunk(out: &mut Vec<u8>, t: [u8; 4], payload: &[u8]) {
 pub fn write(rec: &Recording) -> Vec<u8> {
     let len32 = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
     let mut out = Vec::new();
-    push_words(&mut out, &[MAGIC, VERSION, 16, 4]);
+    push_words(&mut out, &[MAGIC, VERSION, 16, 5]);
     let mut target = Vec::new();
     push_words(
         &mut target,
@@ -541,6 +648,13 @@ pub fn write(rec: &Recording) -> Vec<u8> {
         push_words(&mut mmio, &[e.address, e.value, e.pc, u32::from(e.size)]);
     }
     push_chunk(&mut out, chunk::MMIO, &mmio);
+
+    let mut irqs = Vec::new();
+    push_words(&mut irqs, &[len32(rec.irqs.len()), 0, rec.irq_stack_top]);
+    for e in &rec.irqs {
+        push_words(&mut irqs, &e.words());
+    }
+    push_chunk(&mut out, chunk::IRQS, &irqs);
 
     let mut end = Vec::new();
     push_words(&mut end, &rec.end.cpu.words());
