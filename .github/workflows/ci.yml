@@ -33,17 +33,31 @@ jobs:
       - name: Formatting
         working-directory: host
         run: cargo fmt --all -- --check
+      # Each step also turns its first error lines into annotations, so a
+      # failure is readable in the pull request without opening the log.
       - name: Clippy (warnings are errors)
         working-directory: host
-        run: cargo clippy --locked --all-targets -- -D warnings
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --locked --all-targets --message-format=short -- -D warnings 2>&1 | tee ../clippy.log \
+            || { grep -E '^[^ ]+:[0-9]+:[0-9]+: (error|warning)' ../clippy.log | head -10 | sed 's/^/::error::/'; exit 1; }
       - name: Tests
         working-directory: host
-        run: cargo test --locked
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked 2>&1 | tee ../test.log \
+            || { grep -E "panicked|^error|FAILED|assert" ../test.log | head -10 | sed 's/^/::error::/'; exit 1; }
       - name: Docs
         working-directory: host
+        shell: bash
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --locked --no-deps
+        run: |
+          set -o pipefail
+          cargo doc --locked --no-deps 2>&1 | tee ../doc.log \
+            || { grep -E "^(error|warning)" -A3 ../doc.log | head -10 | sed 's/^/::error::/'; exit 1; }
 
   msrv:
     name: Rust minimum supported version (1.85)
