@@ -4,7 +4,7 @@
 Generates random Thumb programs, assembles them with the GNU assembler, runs
 each one on QEMU (mps2-an386, logging the register state before every
 instruction) and on backstep-emu-trace, and requires the two traces to be
-identical: r0-r15 and xPSR (flags, IT state, T bit) at every step.
+identical: r0-r15 and xPSR (flags, Q, GE, IT state, T bit) at every step.
 
 The generator covers every 16-bit Thumb instruction class: shifts, add/sub
 (register, 3- and 8-bit immediate), data processing, high-register
@@ -12,6 +12,15 @@ ADD/MOV/CMP (including PC and SP as operands), loads and stores of every
 size and addressing form, LDR literal, ADR, SP-relative accesses, SP
 adjustment, PUSH/POP, LDM/STM, extends, byte reversal, forward branches
 (B, B<cond>, CBZ, CBNZ) and IT blocks of 1-4 instructions.
+
+It also covers every 32-bit Thumb-2 integer and DSP instruction (Gen32):
+data processing with modified immediates and shifted registers, ADDW/SUBW,
+MOVW/MOVT, saturation, bitfields, extends, parallel add/subtract, all
+multiplies and divides, every load/store addressing mode, LDRD/STRD,
+LDM/STM, exclusives, TBB/TBH, B.W/BL forwards and backwards, loads into PC,
+MSR/MRS and running on PSP; 32-bit instructions also appear inside IT
+blocks. Coverage is counted per class and per encoding width; the run
+fails if a required class never executed or an unknown one did.
 
 Usage: emu-difftest.py --emu <backstep-emu-trace> [--programs N] [--length L]
                        [--seed S] [--keep DIR]
@@ -142,8 +151,410 @@ class Gen:
         return f"{self.s('add', cond)}.n {d}, {a}, {b}"
 
 
+DST32 = DST + HI_DST                                # 32-bit forms can write r8-r12
+SRC32 = SRC + HI_DST + ["lr"]
+DP_OPS = ["and", "bic", "orr", "orn", "eor", "add", "adc", "sbc", "sub", "rsb"]
+SHIFTS = [("lsl", 0, 31), ("lsr", 1, 32), ("asr", 1, 32), ("ror", 1, 31)]
+PAR_OPS = ["add16", "asx", "sax", "sub16", "add8", "sub8"]
+SYSREGS = ["apsr", "iapsr", "eapsr", "xpsr", "ipsr", "epsr", "iepsr", "msp", "psp", "primask",
+           "basepri", "basepri_max", "faultmask", "control"]
+
+
+class Gen32(Gen):
+    """32-bit Thumb-2 instructions (single, usable in IT) and blocks."""
+
+    def __init__(self, rnd: random.Random) -> None:
+        super().__init__(rnd)
+        self.label = 0
+        self.have_pool = False
+
+    def lbl(self) -> str:
+        self.label += 1
+        return f".Lg{self.label}"
+
+    def fs(self, base: str, cond: str | None, flags: bool) -> str:
+        """Optional S then optional condition: "adds", "addseq", "addeq"."""
+        return base + ("s" if flags else "") + (cond or "")
+
+    def modimm(self) -> int:
+        r = self.r
+        k = r.randrange(5)
+        x = r.randrange(1, 256)
+        if k == 0:
+            return r.randrange(256)
+        if k < 4:
+            return x * [0, 0x00010001, 0x01000100, 0x01010101][k]
+        rot = r.randrange(8, 32)
+        v = 0x80 | r.randrange(128)
+        return ((v >> rot) | (v << (32 - rot))) & 0xFFFFFFFF
+
+    def shift(self, rrx: bool = True) -> str:
+        r = self.r
+        if rrx and r.random() < 0.1:
+            return ", rrx"
+        if r.random() < 0.2:
+            return ""
+        name, lo, hi = r.choice(SHIFTS)
+        return f", {name} #{self.imm(lo, hi)}"
+
+    def ror(self) -> str:
+        return self.r.choice(["", ", ror #8", ", ror #16", ", ror #24"])
+
+    def insn32(self, cond: str | None) -> str:
+        """One random 32-bit instruction that is valid anywhere, IT included."""
+        r = self.r
+        c = cond or ""
+        d, a, b, e = r.choice(DST32), r.choice(SRC32), r.choice(SRC32), r.choice(SRC32)
+        flags = r.random() < 0.5
+        # Kinds 30-35 give the instruction groups with many variants
+        # (parallel, multiply, long multiply) more weight.
+        kind = r.randrange(38)
+        kind = {30: 14, 31: 14, 32: 16, 33: 16, 34: 16, 35: 17}.get(kind, kind)
+        if kind == 36:
+            if r.random() < 0.5:
+                return f"pkhbt{c} {d}, {a}, {b}{r.choice(['', f', lsl #{self.imm(1, 31)}'])}"
+            return f"pkhtb{c} {d}, {a}, {b}, asr #{self.imm(1, 32)}"
+        if kind == 37:   # SP as an operand (or, in small word steps, as the result)
+            op = r.randrange(7)
+            if op == 0:
+                return f"{self.fs(r.choice(['add', 'sub']), cond, flags)}.w {d}, sp, #0x{self.modimm():x}"
+            if op == 1:
+                return f"{self.fs(r.choice(['add', 'sub']), cond, flags)}.w {d}, sp, {b}" \
+                       f"{r.choice(['', ', lsl #1', ', lsl #2', ', lsl #3', ', lsr #5', ', asr #2', ', ror #9'])}"
+            if op == 2:
+                return f"{self.c('mov', cond)}.w {d}, sp"
+            if op == 3:
+                return f"{r.choice(['cmp', 'cmn'])}{c}.w sp, {b}{self.shift(rrx=False)}"
+            if op == 4:
+                return f"{r.choice(['add', 'sub'])}{c}.w sp, sp, #{self.imm(0, 63) * 4}"
+            if op == 5:
+                return f"{r.choice(['addw', 'subw'])}{c} sp, sp, #{self.imm(0, 1023) * 4}"
+            return f"{self.c('cmp', cond)}.w sp, #0x{self.modimm():x}"
+        if kind == 0:
+            return f"{self.fs(r.choice(DP_OPS), cond, flags)}.w {d}, {a}, #0x{self.modimm():x}"
+        if kind == 1:
+            return f"{self.fs(r.choice(['mov', 'mvn']), cond, flags)}.w {d}, #0x{self.modimm():x}"
+        if kind == 2:
+            return f"{r.choice(['tst', 'teq', 'cmn', 'cmp'])}{c}.w {a}, #0x{self.modimm():x}"
+        if kind == 3:
+            return f"{self.fs(r.choice(DP_OPS), cond, flags)}.w {d}, {a}, {b}{self.shift()}"
+        if kind == 4:
+            op = r.randrange(4)
+            if op == 0:
+                return f"{self.fs('mov', cond, flags)}.w {d}, {b}"
+            if op == 1:
+                return f"{self.fs('mvn', cond, flags)}.w {d}, {b}{self.shift()}"
+            if op == 2:
+                return f"{self.fs('rrx', cond, flags)}.w {d}, {b}"
+            name, lo, hi = r.choice(SHIFTS)
+            return f"{self.fs(name, cond, flags)}.w {d}, {b}, #{self.imm(max(lo, 1), hi)}"
+        if kind == 5:
+            return f"{r.choice(['tst', 'teq', 'cmn', 'cmp'])}{c}.w {a}, {b}{self.shift()}"
+        if kind == 6:
+            return f"{self.fs(r.choice(['lsl', 'lsr', 'asr', 'ror']), cond, flags)}.w {d}, {a}, {b}"
+        if kind == 7:
+            op = r.choice(["addw", "subw"])
+            base = r.choice(SRC32 + ["sp"])
+            return f"{op}{c} {d}, {base}, #{self.imm(0, 4095)}"
+        if kind == 8:
+            return f"adr{c}.w {d}, {'8b' if self.have_pool and r.random() < 0.5 else '8f'}"
+        if kind == 9:
+            return f"{r.choice(['movw', 'movt'])}{c} {d}, #0x{self.imm(0, 0xFFFF):x}"
+        if kind == 10:
+            op = r.randrange(4)
+            if op == 0:
+                sh = r.choice(["", f", lsl #{self.imm(0, 31)}", f", asr #{self.imm(1, 31)}"])
+                return f"ssat{c} {d}, #{self.imm(1, 32)}, {a}{sh}"
+            if op == 1:
+                sh = r.choice(["", f", lsl #{self.imm(0, 31)}", f", asr #{self.imm(1, 31)}"])
+                return f"usat{c} {d}, #{self.imm(0, 31)}, {a}{sh}"
+            if op == 2:
+                return f"ssat16{c} {d}, #{self.imm(1, 16)}, {a}"
+            return f"usat16{c} {d}, #{self.imm(0, 15)}, {a}"
+        if kind == 11:
+            lsb = self.imm(0, 31)
+            width = self.imm(1, 32 - lsb)
+            op = r.choice(["sbfx", "ubfx", "bfi", "bfc"])
+            if op == "bfc":
+                return f"bfc{c} {d}, #{lsb}, #{width}"
+            return f"{op}{c} {d}, {a}, #{lsb}, #{width}"
+        if kind == 12:
+            if r.random() < 0.5:
+                op = r.choice(["sxth", "uxth", "sxtb", "uxtb"])
+                return f"{op}{c}.w {d}, {b}{self.ror()}"
+            op = r.choice(["sxtb16", "uxtb16"])
+            return f"{op}{c} {d}, {b}{self.ror()}"
+        if kind == 13:
+            op = r.choice(["sxtah", "uxtah", "sxtab", "uxtab", "sxtab16", "uxtab16"])
+            return f"{op}{c} {d}, {a}, {b}{self.ror()}"
+        if kind == 14:
+            if r.random() < 0.1:
+                return f"sel{c} {d}, {a}, {b}"
+            return f"{r.choice(['s', 'q', 'sh', 'u', 'uq', 'uh'])}{r.choice(PAR_OPS)}{c} {d}, {a}, {b}"
+        if kind == 15:
+            if r.random() < 0.5:
+                return f"{r.choice(['qadd', 'qdadd', 'qsub', 'qdsub'])}{c} {d}, {a}, {b}"
+            op = r.choice(["rev.w", "rev16.w", "rbit", "revsh.w", "clz"])
+            base, _, wide = op.partition(".")
+            return f"{base}{c}{'.w' if wide else ''} {d}, {b}"
+        if kind == 16:
+            op = r.randrange(9)
+            xy = r.choice(["bb", "bt", "tb", "tt"])
+            x = r.choice(["", "x"])
+            if op == 0:
+                return f"mul{c}.w {d}, {a}, {b}"
+            if op == 1:
+                return f"{r.choice(['mla', 'mls'])}{c} {d}, {a}, {b}, {e}"
+            if op == 2:
+                return f"smul{xy}{c} {d}, {a}, {b}"
+            if op == 3:
+                return f"smla{xy}{c} {d}, {a}, {b}, {e}"
+            if op == 4:
+                m = r.choice(["smuad", "smusd"])
+                return f"{m}{x}{c} {d}, {a}, {b}"
+            if op == 5:
+                m = r.choice(["smlad", "smlsd"])
+                return f"{m}{x}{c} {d}, {a}, {b}, {e}"
+            if op == 6:
+                yy = r.choice(["b", "t"])
+                if r.random() < 0.5:
+                    return f"smulw{yy}{c} {d}, {a}, {b}"
+                return f"smlaw{yy}{c} {d}, {a}, {b}, {e}"
+            if op == 7:
+                rr = r.choice(["", "r"])
+                if r.random() < 0.33:
+                    return f"smmul{rr}{c} {d}, {a}, {b}"
+                return f"{r.choice(['smmla', 'smmls'])}{rr}{c} {d}, {a}, {b}, {e}"
+            if r.random() < 0.5:
+                return f"usad8{c} {d}, {a}, {b}"
+            return f"usada8{c} {d}, {a}, {b}, {e}"
+        if kind == 17:
+            lo, hi = r.sample(DST32, 2)
+            op = r.randrange(6)
+            if op == 0:
+                return f"{r.choice(['smull', 'umull', 'smlal', 'umlal', 'umaal'])}{c} {lo}, {hi}, {a}, {b}"
+            if op == 1:
+                return f"smlal{r.choice(['bb', 'bt', 'tb', 'tt'])}{c} {lo}, {hi}, {a}, {b}"
+            if op == 2:
+                return f"{r.choice(['smlald', 'smlsld'])}{r.choice(['', 'x'])}{c} {lo}, {hi}, {a}, {b}"
+            return f"{r.choice(['sdiv', 'udiv'])}{c} {d}, {a}, {b}"
+        if kind in (18, 19):
+            return self.load_store32(cond)
+        if kind == 20:
+            d1, d2 = r.sample(DST32, 2)
+            sign = r.choice(["", "-"])
+            if r.random() < 0.15:
+                return f"ldrd{c} {d1}, {d2}, {'8b' if self.have_pool and r.random() < 0.5 else '8f'}"
+            if r.random() < 0.5:
+                return f"ldrd{c} {d1}, {d2}, [r7, #{sign}{self.imm(0, 255) * 4}]"
+            return f"strd{c} {a}, {b}, [r7, #{sign}{self.imm(0, 255) * 4}]"
+        if kind == 21:
+            return f"{r.choice(['nop', 'yield', 'sev'])}{c}.w" if r.random() < 0.5 else \
+                f"{r.choice(['dmb', 'dsb', 'isb', 'clrex'])}{c}"
+        if kind == 22:
+            return f"mrs{c} {d}, {r.choice(SYSREGS)}"
+        if kind == 23:
+            reg = r.choice(["apsr_nzcvq", "apsr_g", "apsr_nzcvqg", "primask", "basepri", "basepri_max",
+                            "faultmask", "psp"])
+            return f"msr{c} {reg}, {a}"
+        if kind == 24:   # PUSH.W/POP.W, one register (STR/LDR T4) or several (STMDB/LDM)
+            if r.random() < 0.5:
+                if r.random() < 0.5:
+                    return f"push{c}.w {{{a}}}"
+                return f"pop{c}.w {{{d}}}"
+            if r.random() < 0.5:
+                regs = sorted(r.sample(range(13), self.imm(2, 5))) + ([14] if r.random() < 0.3 else [])
+                return f"push{c}.w {{{', '.join('lr' if i == 14 else f'r{i}' for i in regs)}}}"
+            regs = sorted(r.sample([0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 12], self.imm(2, 5)))
+            return f"pop{c}.w {{{', '.join(f'r{i}' for i in regs)}}}"
+        if kind == 25:   # LDM/STM without writeback through r7
+            regs = sorted(r.sample([0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 12], self.imm(2, 5)))
+            op = r.choice(["ldmia", "stmia", "ldmdb", "stmdb"])
+            return f"{op}{c}.w r7, {{{', '.join(f'r{i}' for i in regs)}}}"
+        if kind == 26:   # SP-relative word access
+            if r.random() < 0.5:
+                return f"ldr{c}.w {d}, [sp, #{self.imm(0, 4095)}]"
+            return f"str{c}.w {a}, [sp, #{self.imm(0, 4095)}]"
+        return f"{self.fs(r.choice(DP_OPS), cond, flags)}.w {d}, {a}, #0x{self.modimm():x}"
+
+    def load_store32(self, cond: str | None) -> str:
+        r = self.r
+        c = cond or ""
+        d, a = r.choice(DST32), r.choice(SRC32)
+        load = r.random() < 0.6
+        size = r.choice(["", "h", "b", "sh", "sb"] if load else ["", "h", "b"])
+        op = ("ldr" if load else "str") + size
+        reg = d if load else a
+        form = r.randrange(7)
+        if form == 0:
+            return f"{op}{c}.w {reg}, [r7, #{self.imm(0, 4095)}]"
+        if form == 1:
+            return f"{op}{c}.w {reg}, [r7, #-{self.imm(1, 255)}]"
+        if form == 2:
+            return f"{op}{c}.w {reg}, [r7, r6, lsl #{self.imm(0, 3)}]"
+        if form == 3:
+            return f"{op}t{c} {reg}, [r7, #{self.imm(0, 255)}]"
+        if form == 4 and load:
+            target = "8b" if self.have_pool and r.random() < 0.5 else "8f"
+            if size == "":
+                return f"ldr{c}.w {d}, ={self.literal()}" if r.random() < 0.5 else f"ldr{c}.w {d}, {target}"
+            return f"{op}{c}.w {d}, {target}"
+        if form == 5:
+            hint = r.choice(["pld", "pli"])
+            addr = r.choice([f"[r7, #{self.imm(0, 4095)}]", f"[r7, #-{self.imm(1, 255)}]",
+                             f"[r7, r6, lsl #{self.imm(0, 3)}]"])
+            return f"{hint}{c} {addr}"
+        return f"{op}{c}.w {reg}, [r7, #{self.imm(0, 4095)}]"
+
+    def literal(self) -> str:
+        return f"0x{(self.r.getrandbits(32) | 0x80000001) & 0xFFFFFFFD:08x}"
+
+    def alu(self) -> str:
+        """A random instruction that neither accesses memory nor uses r5
+        (the address register of the blocks below)."""
+        while True:
+            text = self.insn32(None) if self.r.random() < 0.5 else self.insn(None)
+            if not re.search(r"\[|ldr|str|push|pop|ldm|stm|adr|ADR|msr|mrs|clrex|\br5\b", text):
+                return text
+
+    def block(self) -> list[str]:
+        """A multi-instruction sequence, outside IT blocks."""
+        r = self.r
+        kind = r.randrange(11)
+        lo = [f"r{i}" for i in (0, 1, 2, 3, 4)] + HI_DST
+        if kind == 10:  # clear the sticky Q flag, then an instruction that may set it
+            # Operands near the saturation limits, so that about half of
+            # these overflow: halfwords of large magnitude, an accumulator
+            # close to +/-2^31.
+            d, a, b, e = r.sample(lo, 4)
+            values = []
+            for reg, near in ((a, False), (b, False), (e, True)):
+                if near:
+                    hi = r.choice([0x7FFF, 0x7FF0, 0x8000, 0x800F])
+                else:
+                    hi = r.choice([0x7FFF, 0x8000, 0x4000, 0xC000, r.randrange(0x10000)])
+                lo16 = r.choice([0x7FFF, 0x8000, r.randrange(0x10000)])
+                values += [f"movw {reg}, #0x{lo16:x}", f"movt {reg}, #0x{hi:x}"]
+            xy = r.choice(["bb", "bt", "tb", "tt"])
+            x = r.choice(["", "x"])
+            q_insn = r.choice([
+                f"ssat {d}, #{self.imm(1, 32)}, {a}", f"usat {d}, #{self.imm(0, 31)}, {a}",
+                f"ssat16 {d}, #{self.imm(1, 16)}, {a}", f"usat16 {d}, #{self.imm(0, 15)}, {a}",
+                f"{r.choice(['qadd', 'qsub', 'qdadd', 'qdsub'])} {d}, {a}, {b}",
+                f"smla{xy} {d}, {a}, {b}, {e}", f"smlad{x} {d}, {a}, {b}, {e}",
+                f"smuad{x} {d}, {a}, {b}", f"smlsd{x} {d}, {a}, {b}, {e}",
+                f"smlaw{r.choice(['b', 't'])} {d}, {a}, {b}, {e}"])
+            return values + ["mrs r5, apsr", "bic.w r5, r5, #0x08000000", "msr apsr_nzcvq, r5", q_insn]
+        if kind == 0:   # pre/post-indexed single load/store with writeback
+            d = r.choice(lo)
+            load = r.random() < 0.6
+            op = ("ldr" if load else "str") + r.choice(["", "h", "b", "sh", "sb"] if load else ["", "h", "b"])
+            imm = f"#{r.choice(['', '-'])}{self.imm(0, 255)}"
+            addr = f"[r5, {imm}]!" if r.random() < 0.5 else f"[r5], {imm}"
+            if r.random() < 0.15:   # PUSH.W / POP.W of one register is this form with SP
+                return [f"{'push' if r.random() < 0.5 else 'pop'}.w {{{d}}}"]
+            return ["mov.w r5, r7", f"{op}.w {d}, {addr}"]
+        if kind == 1:   # LDRD/STRD with writeback
+            d1, d2 = r.sample(lo, 2)
+            op = "ldrd" if r.random() < 0.5 else "strd"
+            imm = f"#{r.choice(['', '-'])}{self.imm(0, 255) * 4}"
+            addr = f"[r5, {imm}]!" if r.random() < 0.5 else f"[r5], {imm}"
+            return ["mov.w r5, r7", f"{op} {d1}, {d2}, {addr}"]
+        if kind == 2:   # LDM/STM with writeback
+            regs = sorted(r.sample([0, 1, 2, 3, 4, 8, 9, 10, 11, 12], self.imm(2, 6)))
+            names = [f"r{i}" for i in regs]
+            op = r.choice(["ldmia", "stmia", "ldmdb", "stmdb"])
+            if op.startswith("stm") and r.random() < 0.3:
+                names.append("lr")
+            return ["mov.w r5, r7", f"{op}.w r5!, {{{', '.join(names)}}}"]
+        if kind == 3:   # exclusive pair
+            st, val = r.sample(lo, 2)
+            dest = r.choice(lo)
+            size = r.choice(["", "b", "h"])
+            off = self.imm(0, 255) * 4
+            mid = [self.alu() for _ in range(self.imm(0, 2))]
+            variant = r.randrange(4)
+            if size == "":
+                ld = [f"ldrex {dest}, [r7, #{off}]"]
+                addr = f"[r7, #{off if variant != 2 else (off + 4) % 1024}]"
+                pre = []
+            else:
+                k = self.imm(0, 1023) & (~1 if size == "h" else ~0)
+                pre = [f"addw r5, r7, #{k}"]
+                ld = [f"ldrex{size} {dest}, [r5]"]
+                addr = "[r5]"
+                if variant == 2:
+                    variant = 3
+            if dest == st or dest == val:
+                mid = []
+            tail = ["clrex"] if variant == 1 else []
+            return pre + ld + mid + tail + [f"strex{size} {st}, {val}, {addr}"]
+        if kind == 4:   # TBB / TBH through a table after the instruction
+            idx = r.choice(["r0", "r1", "r2", "r3", "r4"])
+            half = r.random() < 0.5
+            tab, cases = self.lbl(), [self.lbl() for _ in range(4)]
+            out = [f"and.w r5, {idx}, #3",
+                   f"tbh [pc, r5, lsl #1]" if half else "tbb [pc, r5]", f"{tab}:"]
+            directive = ".hword" if half else ".byte"
+            out.append(f"    {directive} " + ", ".join(f"({cl}-{tab})/2" for cl in cases))
+            out.append(".p2align 1")
+            for cl in cases:
+                out += [f"{cl}:", f"    {self.alu()}"]
+            return out
+        if kind == 5:   # forward B.W / B<cond>.W / BL over a few instructions
+            end = self.lbl()
+            op = r.choice(["b.w", f"b{r.choice(CONDS)}.w", "bl"])
+            return [f"{op} {end}"] + [self.alu() for _ in range(self.imm(1, 4))] + [f"{end}:"]
+        if kind == 6:   # backward branches: forward jump, then back, then out
+            fwd, back, end = self.lbl(), self.lbl(), self.lbl()
+            op = r.choice(["b.w", f"b{r.choice(CONDS)}.w", "bl"])
+            return [f"b.w {fwd}", f"{back}:", self.alu(), f"b.w {end}", f"{fwd}:", self.alu(),
+                    f"{op} {back}", f"{end}:"]
+        if kind == 7:   # branches as the last instruction of an IT block
+            end = self.lbl()
+            cnd = r.choice(CONDS)
+            first = [] if r.random() < 0.5 else [f"{self.alu()}"]
+            op = r.choice(["b", "bl"])
+            if first and re.search(r"\b(it|cbz|cbnz|b[a-z]*\.n)\b", first[0]):
+                first = []
+            pattern = "t" * len(first)
+            body = [f"{self.insn32(cnd)}" for _ in first]
+            return [f"it{pattern} {cnd}"] + body + [f"{op}{cnd}.w {end}" if op == "b" else f"bl{cnd} {end}",
+                                                     self.alu(), f"{end}:"]
+        if kind == 8:   # loads into PC: POP.W, LDR.W PC, LDM
+            target = self.lbl()
+            form = r.randrange(4)
+            out = [f"ldr.w r4, ={target}+1"]
+            if form == 0:
+                out += ["push.w {r3, r4}", "pop.w {r2, pc}"]
+            elif form == 1:
+                out += ["push.w {r4}", "ldr.w pc, [sp], #4"]
+            elif form == 2:
+                off = self.imm(0, 255) * 4
+                out += [f"str.w r4, [r7, #{off}]", f"ldr.w pc, [r7, #{off}]"]
+            else:
+                off = self.imm(0, 250) * 4
+                out += [f"str.w r4, [r7, #{off + 4}]", f"add.w r5, r7, #{off}", "ldm.w r5, {r3, pc}"]
+            return out + [self.alu(), f"{target}:"]
+        # MSR MSP, or running on PSP for a moment (CONTROL.SPSEL)
+        if r.random() < 0.4:
+            return ["mrs r5, msp", f"sub.w r5, r5, #{self.imm(0, 64) * 4}", "msr msp, r5"]
+        body = []
+        for _ in range(self.imm(1, 3)):
+            choice = r.random()
+            if choice < 0.3:
+                body.append(f"push.w {{r0, r1}}")
+                body.append("pop.w {r2, r3}")
+            elif choice < 0.5:
+                body.append(f"mrs {r.choice(lo)}, {r.choice(['psp', 'msp', 'control'])}")
+            else:
+                body.append(self.alu())
+        return ["mrs r5, msp", "sub.w r5, r5, #0x800", "msr psp, r5", "mov.w r5, #2", "msr control, r5",
+                "isb"] + body + ["mov.w r5, #0", "msr control, r5", "isb"]
+
+
 def program(rnd: random.Random, length: int) -> str:
-    g = Gen(rnd)
+    g = Gen32(rnd)
     lines = [".syntax unified", ".thumb", ".cpu cortex-m4",
              ".section .vectors, \"a\"", ".word 0x20400000", ".word reset + 1",
              ".text", ".thumb_func", ".global reset", "reset:", ".global body_start"]
@@ -175,7 +586,7 @@ def program(rnd: random.Random, length: int) -> str:
             lines.append(f"    it{pattern} {first}")
             conds = [first] + [first if p == "t" else INV[first] for p in pattern]
             for cnd in conds:
-                text = g.insn(cnd)
+                text = g.insn32(cnd) if rnd.random() < 0.5 else g.insn(cnd)
                 if text == "ADR":
                     text = f"{g.c('nop', cnd)}.n"
                 lines.append(f"    {text}")
@@ -195,8 +606,12 @@ def program(rnd: random.Random, length: int) -> str:
                 lines.append(f"    {'nop.n' if text == 'ADR' else text}")
             lines.append(f"9{label}:")
             emitted += skip + 1
+        elif choice < 0.30:                     # 32-bit sequence (branches, exclusives, ...)
+            block = g.block()
+            lines += [f"    {t}" if not t.endswith(":") and not t.startswith(".") else t for t in block]
+            emitted += sum(1 for t in block if not t.endswith(":") and not t.startswith("."))
         else:
-            text = g.insn(None)
+            text = g.insn32(None) if rnd.random() < 0.5 else g.insn(None)
             if text == "ADR":
                 text = f"adr.n {rnd.choice(DST)}, 8f"
             lines.append(f"    {text}")
@@ -206,10 +621,11 @@ def program(rnd: random.Random, length: int) -> str:
             # Literal pool (and ADR target) within reach, branched over.
             since_pool = 0
             label += 1
-            lines += [f"    b.n 9{label}f", "    .p2align 2", "8:", f"    .word 0x{rnd.getrandbits(32):08x}",
-                      "    .ltorg", f"9{label}:"]
+            lines += [f"    b.w 9{label}f", "    .p2align 2", "8:", f"    .word 0x{rnd.getrandbits(32):08x}",
+                      f"    .word 0x{rnd.getrandbits(32):08x}", "    .ltorg", f"9{label}:"]
+            g.have_pool = True
     label += 1
-    lines += [f"    b.n 9{label}f", "    .p2align 2", "8:", "    .word 0x8badf00d", "    .ltorg",
+    lines += [f"    b.w 9{label}f", "    .p2align 2", "8:", "    .word 0x8badf00d", "    .word 0x0ddba11", "    .ltorg",
               f"9{label}:",
               "    ldr r1, =0x20026", "    movs r0, #0x18", "    bkpt 0xab", "    .ltorg",
               ".section .buf, \"aw\""]
@@ -236,14 +652,85 @@ def parse(text: str) -> list[tuple[int, ...]]:
     return out
 
 
-REQUIRED = {
+REQUIRED16 = {
     "lsls", "lsrs", "asrs", "adds", "subs", "movs", "cmp", "ands", "eors", "adcs", "sbcs",
     "rors", "tst", "negs", "cmn", "orrs", "muls", "bics", "mvns", "add", "mov", "ldr", "str",
     "ldrh", "strh", "ldrb", "strb", "ldrsb", "ldrsh", "push", "pop", "stmia", "ldmia", "adr",
     "sxtb", "sxth", "uxtb", "uxth", "rev", "rev16", "revsh", "it", "b", "bcond", "cbz",
-    "cbnz", "nop", "sub", "bkpt", "conditional (IT)",
+    "cbnz", "nop", "sub", "bkpt",
+    # Inside an IT block the 16-bit data-processing forms do not set flags.
+    "adc", "and", "asr", "bic", "eor", "lsl", "lsr", "mul", "mvn", "neg", "orr", "ror", "sbc",
 }
-COND_SUFFIX = re.compile(r"(eq|ne|cs|cc|hs|lo|mi|pl|vs|vc|hi|ls|ge|lt|gt|le)$")
+_DP = ["and", "bic", "orr", "orn", "eor", "add", "adc", "sbc", "sub", "rsb", "mov", "mvn",
+       "lsl", "lsr", "asr", "ror", "lsl imm", "lsr imm", "asr imm", "ror imm", "rrx"]
+_PAR = [p + o for p in ("s", "q", "sh", "u", "uq", "uh") for o in PAR_OPS]
+_XY = ["bb", "bt", "tb", "tt"]
+REQUIRED32 = {f"{m}.w" for m in (
+    _DP + [m.replace(" ", "s ") if " " in m else m + "s" for m in _DP] + _PAR + ["smul" + x for x in _XY] + ["smla" + x for x in _XY]
+    + ["smlal" + x for x in _XY] + [
+        "tst", "teq", "cmn", "cmp", "pkhbt", "pkhtb", "addw", "subw", "adr", "movw", "movt", "ssat", "usat",
+        "ssat16", "usat16", "sbfx", "ubfx", "bfi", "bfc", "sxth", "uxth", "sxtb", "uxtb",
+        "sxtb16", "uxtb16", "sxtah", "uxtah", "sxtab", "uxtab", "sxtab16", "uxtab16", "sel",
+        "qadd", "qdadd", "qsub", "qdsub", "rev", "rev16", "rbit", "revsh", "clz", "mul", "mla",
+        "mls", "smuad", "smuadx", "smusd", "smusdx", "smlad", "smladx", "smlsd", "smlsdx",
+        "smulwb", "smulwt", "smlawb", "smlawt", "smmul", "smmulr", "smmla", "smmlar", "smmls",
+        "smmlsr", "usad8", "usada8", "smull", "umull", "smlal", "umlal", "umaal", "smlald",
+        "smlaldx", "smlsld", "smlsldx", "sdiv", "udiv", "ldr", "ldrh", "ldrb", "ldrsh", "ldrsb",
+        "str", "strh", "strb", "ldrt", "ldrht", "ldrbt", "ldrsht", "ldrsbt", "strt", "strht",
+        "strbt", "pld", "pli", "ldrd", "strd", "ldrex", "strex", "ldrexb", "ldrexh", "strexb",
+        "strexh", "tbb", "tbh", "ldmia", "stmia", "ldmdb", "stmdb", "push", "pop", "push one",
+        "pop one", "pop pc", "pop one pc", "ldmia pc", "ldr pc", "b",
+        "bcond", "bl", "nop", "yield", "sev", "dmb", "dsb", "isb", "clrex", "mrs", "msr"])}
+REQUIRED = REQUIRED16 | REQUIRED32 | {"conditional (IT)", "conditional (IT).w"}
+BASES = {k.removesuffix(".w") for k in REQUIRED}
+SHIFT_OPERAND = re.compile(r", (lsl|lsr|asr|ror) #\d+$|, (rrx)$")
+COND = r"(eq|ne|cs|cc|hs|lo|mi|pl|vs|vc|hi|ls|ge|lt|gt|le)"
+COND_SUFFIX = re.compile(COND + "$")
+COND_BRANCH = re.compile("^b" + COND + "$")
+
+
+def classify(hexwords: list[str], mnemonic: str, operands: str) -> tuple[str, bool]:
+    """(instruction class, conditional by IT) of one disassembled instruction."""
+    wide = len(hexwords) == 2
+    mn = mnemonic.split(".")[0]
+    # objdump prints ADR as "add/addw/subw Rd, pc, #imm".
+    if mn in ("add", "addw", "subw") and ", pc, #" in operands:
+        mn = "adr"
+    conditional = False
+    if mn.startswith("it") and len(mn) <= 5 and set(mn[2:]) <= set("te"):
+        base = "it"
+    elif COND_BRANCH.match(mn):
+        # B<cond>: encoding T1/T3, unless it is a 32-bit B (T4) in IT.
+        if wide and int(hexwords[1], 16) & 0x1000:
+            base, conditional = "b", True
+        else:
+            base = "bcond"
+    elif mn in BASES:
+        base = mn
+    else:
+        stripped = COND_SUFFIX.sub("", mn)
+        conditional = stripped != mn and stripped in BASES
+        base = stripped if conditional else mn
+    if wide:
+        # objdump writes the immediate shifts as MOV.W with a shifted
+        # operand, and PUSH.W/POP.W as STMDB/LDMIA/STR/LDR with SP.
+        shift = SHIFT_OPERAND.search(operands)
+        if base in ("mov", "movs") and shift:
+            flag = "s" if base == "movs" else ""
+            base = f"rrx{flag}" if shift.group(2) else f"{shift.group(1)}{flag} imm"
+        elif base == "stmdb" and operands.startswith("sp!"):
+            base = "push"
+        elif base == "ldmia" and operands.startswith("sp!"):
+            base = "pop pc" if "pc}" in operands else "pop"
+        elif base == "ldmia" and "pc}" in operands:
+            base = "ldmia pc"
+        elif base == "str" and operands.endswith("[sp, #-4]!"):
+            base = "push one"
+        elif base == "ldr" and operands.endswith("[sp], #4"):
+            base = "pop one pc" if operands.startswith("pc") else "pop one"
+        elif base == "ldr" and operands.startswith("pc,"):
+            base = "ldr pc"
+    return base + (".w" if wide else ""), conditional
 
 
 def mnemonic_classes(elf: Path, pcs: list[int]) -> dict[str, int]:
@@ -252,26 +739,18 @@ def mnemonic_classes(elf: Path, pcs: list[int]) -> dict[str, int]:
                          text=True).stdout
     at = {}
     for line in dis.splitlines():
-        m = re.match(r"^\s+([0-9a-f]+):\s+(?:[0-9a-f]{4} ?){1,2}\s+(\S+)\s*(.*)", line)
+        m = re.match(r"^\s+([0-9a-f]+):\s+((?:[0-9a-f]{4} ?){1,2})\s+(\S+)\s*(.*)", line)
         if m:
-            mn = m.group(2).split(".")[0]
-            # objdump prints ADR as "add Rd, pc, #imm".
-            at[int(m.group(1), 16)] = "adr" if mn == "add" and ", pc, #" in m.group(3) else mn
+            at[int(m.group(1), 16)] = classify(m.group(2).split(), m.group(3), m.group(4))
     counts: dict[str, int] = {}
     for pc in pcs:
-        mn = at.get(pc)
-        if mn is None:
+        if pc not in at:
             continue
-        if mn.startswith("it") and len(mn) <= 5 and set(mn[2:]) <= set("te"):
-            key = "it"
-        elif mn.startswith("b") and len(mn) == 3 and COND_SUFFIX.search(mn) and mn not in ("bic", "bkpt"):
-            key = "bcond"
-        else:
-            base = COND_SUFFIX.sub("", mn) if mn not in REQUIRED else mn
-            if base != mn:
-                counts["conditional (IT)"] = counts.get("conditional (IT)", 0) + 1
-            key = base
+        key, conditional = at[pc]
         counts[key] = counts.get(key, 0) + 1
+        if conditional:
+            it_key = "conditional (IT)" + (".w" if key.endswith(".w") else "")
+            counts[it_key] = counts.get(it_key, 0) + 1
     return counts
 
 
@@ -340,8 +819,13 @@ def main() -> int:
             log.unlink()
     missing = sorted(REQUIRED - set(coverage))
     print("executed: " + ", ".join(f"{k}={coverage[k]}" for k in sorted(coverage)))
+    unexpected = sorted(set(coverage) - REQUIRED)
+    if unexpected:
+        print(f"emu-difftest: FAIL (unclassified instructions executed: {', '.join(unexpected)})")
+        return 1
     if missing:
         print(f"emu-difftest: FAIL (instruction classes never executed: {', '.join(missing)})")
+        print(f"(least executed: {', '.join(f'{k}={v}' for k, v in sorted(coverage.items(), key=lambda kv: kv[1])[:10])})")
         return 1
     print(f"emu-difftest: PASS ({args.programs} programs, {total} instructions identical to QEMU, "
           f"all {len(REQUIRED)} instruction classes executed)")

@@ -45,6 +45,8 @@ run_firmware() {
     scripts/qemu-nucleo-smoke.sh firmware/build/nucleo-f411re/blinky.elf
     step "Firmware: NUCLEO-F411RE MPU trap test runs end to end on QEMU netduinoplus2"
     scripts/qemu-nucleo-trap-smoke.sh firmware/build/nucleo-f411re/mmio_trap_hw.elf
+    step "Firmware: NUCLEO-F411RE exclusive-monitor test runs end to end on QEMU netduinoplus2"
+    scripts/qemu-nucleo-excl-smoke.sh firmware/build/nucleo-f411re/exclusive_hw.elf
     step "Firmware: host CLI agrees with recorder CRC on built image"
     local bin=firmware/build/nucleo-f411re/blinky.bin
     local ours theirs
@@ -55,7 +57,7 @@ run_firmware() {
         exit 1
     fi
     echo "PASS backstep crc32 == zlib crc32 ($ours)"
-    step "Emulator: random Thumb programs, every instruction identical to QEMU"
+    step "Emulator: random Thumb and Thumb-2 programs, every instruction identical to QEMU"
     (cd host && cargo build --locked --release -p backstep-emu)
     python3 scripts/emu-difftest.py --emu host/target/release/backstep-emu-trace \
         --programs 40 --length 1500 --seed "${EMU_DIFFTEST_SEED:-1}"

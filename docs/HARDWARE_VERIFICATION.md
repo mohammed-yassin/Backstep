@@ -10,6 +10,7 @@ Each entry has a script that prints a report block to paste below.
 |-----------|-------|--------|--------|
 | M0 | Blinky boots from flash, LED LD2 blinks at 1 Hz, console at 115200 baud, heartbeat period 1.000 s, on-target CRC-32 correct | `scripts/hil/m0_nucleo_f411re.py` | Pending |
 | M1 | MPU trap on real STM32F411 registers: all load forms, stores, interrupts at priority 0x80 and 0, trapped console; cycles per trapped load (DWT) | `scripts/hil/m1_nucleo_f411re.py` | Pending |
+| M2 | Exclusive monitor: LDREX/STREX and CLREX behave as required; measure STREX to another address, of another size, after a plain store and after an exception | `scripts/hil/m2_nucleo_f411re.py` | Pending |
 
 ## M0: blinky on NUCLEO-F411RE
 
@@ -48,5 +49,20 @@ Same procedure as M0, with a different image and script:
 
 The test temporarily writes `GPIOB_AFRH` (PB8-PB15 alternate functions,
 unused while those pins are inputs after reset) and restores it.
+
+**Report:** _not run yet_
+
+## M2: exclusive monitor on NUCLEO-F411RE
+
+Same procedure, with `firmware/build/nucleo-f411re/exclusive_hw.bin` and
+`scripts/hil/m2_nucleo_f411re.py <serial-port>`. The report includes a
+table of the chip's STREX results next to the emulator's defaults and says
+which emulator setting matches this chip; that result goes into
+[ADR 0006](adr/0006-emulator.md) and decides the replay default for
+STM32F4 recordings (M3).
+
+QEMU's results for reference (STM32F405 model, printed by CI):
+`other_address` fails, `other_size` succeeds, `plain_store` succeeds,
+`exception` fails.
 
 **Report:** _not run yet_

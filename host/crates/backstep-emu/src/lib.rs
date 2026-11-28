@@ -9,9 +9,11 @@
 //! to a [`Bus`] implementation, which during replay answers loads from the
 //! recording.
 //!
-//! Status (milestone M2, part 1): all 16-bit Thumb instructions, IT
-//! blocks, and the ELF loader. 32-bit Thumb-2 instructions and exceptions
-//! follow in the next parts of M2.
+//! Status (milestone M2, part 2): every 16-bit Thumb and 32-bit Thumb-2
+//! integer and DSP instruction of ARMv7E-M, IT blocks, the special
+//! registers (MSR/MRS, PRIMASK, BASEPRI, FAULTMASK, CONTROL, MSP/PSP),
+//! exclusives, and the ELF loader. Exceptions follow in part 3 of M2 and
+//! floating point in M7.
 
 // An instruction-set emulator converts between register widths and
 // signedness constantly, always deliberately; these lints would add noise

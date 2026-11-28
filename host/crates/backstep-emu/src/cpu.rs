@@ -7,6 +7,8 @@
 use crate::alu::{add_with_carry, decode_imm_shift, shift_c, Flags, ShiftType};
 use crate::memory::{Bus, Fault, Memory};
 
+mod thumb32;
+
 /// Why execution stopped. Every case leaves the CPU state as it was
 /// before the stopping instruction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +63,15 @@ pub enum Stop {
         /// The `EXC_RETURN` value.
         value: u32,
     },
+    /// An unaligned access by an instruction that requires alignment
+    /// (LDM/STM/PUSH/POP, LDRD/STRD, LDREX/STREX): a `UsageFault` on the
+    /// real core.
+    Unaligned {
+        /// Address of the instruction.
+        pc: u32,
+        /// The address accessed.
+        address: u32,
+    },
 }
 
 /// The core: registers, flags and memory.
@@ -76,6 +87,30 @@ pub struct Cpu {
     pub ipsr: u32,
     /// PRIMASK.
     pub primask: bool,
+    /// APSR.GE\[3:0\] (set by the parallel add/subtract instructions).
+    pub ge: u8,
+    /// BASEPRI (only the implemented priority bits, see `priority_mask`).
+    pub basepri: u8,
+    /// FAULTMASK.
+    pub faultmask: bool,
+    /// CONTROL: bit 0 nPRIV, bit 1 SPSEL, bit 2 FPCA.
+    pub control: u32,
+    /// The stack pointer not currently in `r[13]` (PSP while MSP is in
+    /// use, and the other way round).
+    pub sp_banked: u32,
+    /// Local exclusive monitor: the address marked by the last LDREX, or
+    /// `None` (Open Access).
+    pub monitor: Option<u32>,
+    /// Whether a STREX must target the address its LDREX marked (QEMU's
+    /// behaviour, the default). Some cores' local monitors do not compare
+    /// addresses at all; `scripts/hil/m2_nucleo_f411re.py` measures which
+    /// one the STM32F411 is (`docs/HARDWARE_VERIFICATION.md`). The access
+    /// size is never compared (QEMU and the architecture agree that a
+    /// mismatch need not fail).
+    pub exclusive_tags_address: bool,
+    /// Implemented bits of an exception priority (0xF0 on STM32F4, which
+    /// implements 4 bits; 0xFF, all 8 bits, in QEMU's `mps2-an386`).
+    pub priority_mask: u8,
     /// RAM and flash.
     pub memory: Memory,
     /// Instructions executed (including ones skipped by IT).
@@ -83,6 +118,21 @@ pub struct Cpu {
 }
 
 type Exec = Result<(), Stop>;
+
+/// Everything `step` restores when an instruction stops.
+#[derive(Clone, Copy)]
+struct Registers {
+    r: [u32; 16],
+    flags: Flags,
+    it: u8,
+    primask: bool,
+    ge: u8,
+    basepri: u8,
+    faultmask: bool,
+    control: u32,
+    sp_banked: u32,
+    monitor: Option<u32>,
+}
 
 impl Cpu {
     /// A core with the given memory, all registers zero.
@@ -94,6 +144,14 @@ impl Cpu {
             it: 0,
             ipsr: 0,
             primask: false,
+            ge: 0,
+            basepri: 0,
+            faultmask: false,
+            control: 0,
+            sp_banked: 0,
+            monitor: None,
+            exclusive_tags_address: true,
+            priority_mask: 0xFF,
             memory,
             instructions: 0,
         }
@@ -120,6 +178,12 @@ impl Cpu {
         self.it = 0;
         self.ipsr = 0;
         self.primask = false;
+        self.ge = 0;
+        self.basepri = 0;
+        self.faultmask = false;
+        self.control = 0;
+        self.sp_banked = 0;
+        self.monitor = None;
         Ok(())
     }
 
@@ -127,7 +191,48 @@ impl Cpu {
     #[must_use]
     pub fn xpsr(&self) -> u32 {
         let it = u32::from(self.it);
-        self.flags.to_bits() | (1 << 24) | ((it & 3) << 25) | ((it >> 2) << 10) | self.ipsr
+        self.flags.to_bits()
+            | (1 << 24)
+            | ((it & 3) << 25)
+            | ((it >> 2) << 10)
+            | (u32::from(self.ge) << 16)
+            | self.ipsr
+    }
+
+    /// Main stack pointer.
+    #[must_use]
+    pub fn msp(&self) -> u32 {
+        if self.using_psp() {
+            self.sp_banked
+        } else {
+            self.r[13]
+        }
+    }
+
+    /// Process stack pointer.
+    #[must_use]
+    pub fn psp(&self) -> u32 {
+        if self.using_psp() {
+            self.r[13]
+        } else {
+            self.sp_banked
+        }
+    }
+
+    /// Thread mode with CONTROL.SPSEL set.
+    fn using_psp(&self) -> bool {
+        self.ipsr == 0 && self.control & 2 != 0
+    }
+
+    /// `CurrentModeIsPrivileged()` (B1.3.1).
+    fn privileged(&self) -> bool {
+        self.ipsr != 0 || self.control & 1 == 0
+    }
+
+    /// FAULTMASK may only be set below priority -1 (not in `NMI` or
+    /// `HardFault`; B5.2.3, CPS and MSR).
+    fn may_set_faultmask(&self) -> bool {
+        !matches!(self.ipsr, 2 | 3)
     }
 
     fn in_it_block(&self) -> bool {
@@ -174,48 +279,46 @@ impl Cpu {
     /// unchanged.
     pub fn step(&mut self, bus: &mut dyn Bus) -> Exec {
         let pc = self.r[15];
-        let hw1 = self.memory.read(pc, 2).ok_or(Stop::BusFault {
-            pc,
-            fault: Fault {
-                address: pc,
-                size: 2,
-                write: false,
-            },
-        })? as u16;
-        if is_32bit(hw1) {
-            let hw2 = self.memory.read(pc + 2, 2).ok_or(Stop::BusFault {
+        let fetch = |cpu: &Cpu, address: u32| {
+            cpu.memory.read(address, 2).ok_or(Stop::BusFault {
                 pc,
                 fault: Fault {
-                    address: pc + 2,
+                    address,
                     size: 2,
                     write: false,
                 },
-            })? as u16;
-            return Err(Stop::Unimplemented {
-                pc,
-                insn: (u32::from(hw1) << 16) | u32::from(hw2),
-            });
-        }
-        let saved = (self.r, self.flags, self.it, self.primask);
-        let is_it = hw1 & 0xFF00 == 0xBF00 && hw1 & 0xF != 0;
+            })
+        };
+        let hw1 = fetch(self, pc)? as u16;
+        let wide = is_32bit(hw1);
+        let insn = if wide {
+            (u32::from(hw1) << 16) | fetch(self, pc + 2)?
+        } else {
+            u32::from(hw1)
+        };
+        let saved = self.registers();
+        let is_it = !wide && hw1 & 0xFF00 == 0xBF00 && hw1 & 0xF != 0;
         let in_it = self.in_it_block();
-        if in_it && not_allowed_in_it(hw1, self.it & 0xF == 0x8) {
+        let last = self.it & 0xF == 0x8;
+        if in_it
+            && if wide {
+                thumb32::not_allowed_in_it(insn, last)
+            } else {
+                not_allowed_in_it(hw1, last)
+            }
+        {
             // UNPREDICTABLE whether or not the condition passes.
-            return Err(Stop::Undefined {
-                pc,
-                insn: u32::from(hw1),
-            });
+            return Err(Stop::Undefined { pc, insn });
         }
         let passed = !in_it || self.flags.condition_passed(u32::from(self.it >> 4));
-        self.r[15] = pc + 2;
-        let result = if passed {
-            self.exec16(bus, pc, hw1, in_it)
-        } else {
-            Ok(())
+        self.r[15] = pc + if wide { 4 } else { 2 };
+        let result = match (passed, wide) {
+            (false, _) => Ok(()),
+            (true, false) => self.exec16(bus, pc, hw1, in_it),
+            (true, true) => self.exec32(bus, pc, insn),
         };
         if let Err(stop) = result {
-            (self.r, self.flags, self.it, self.primask) = saved;
-            self.r[15] = pc;
+            self.restore(saved);
             return Err(stop);
         }
         if in_it && !is_it {
@@ -223,6 +326,43 @@ impl Cpu {
         }
         self.instructions += 1;
         Ok(())
+    }
+
+    fn registers(&self) -> Registers {
+        Registers {
+            r: self.r,
+            flags: self.flags,
+            it: self.it,
+            primask: self.primask,
+            ge: self.ge,
+            basepri: self.basepri,
+            faultmask: self.faultmask,
+            control: self.control,
+            sp_banked: self.sp_banked,
+            monitor: self.monitor,
+        }
+    }
+
+    fn restore(&mut self, s: Registers) {
+        self.r = s.r;
+        self.flags = s.flags;
+        self.it = s.it;
+        self.primask = s.primask;
+        self.ge = s.ge;
+        self.basepri = s.basepri;
+        self.faultmask = s.faultmask;
+        self.control = s.control;
+        self.sp_banked = s.sp_banked;
+        self.monitor = s.monitor;
+    }
+
+    /// Word alignment check for instructions that require it.
+    fn aligned(pc: u32, address: u32, size: u32) -> Exec {
+        if address % size == 0 {
+            Ok(())
+        } else {
+            Err(Stop::Unaligned { pc, address })
+        }
     }
 
     /// Register read as an operand: PC reads as the instruction address + 4.
@@ -360,6 +500,7 @@ impl Cpu {
                 }
                 let load = h & 0x0800 != 0;
                 let base = self.r[rn8];
+                Self::aligned(pc, base, 4)?;
                 let mut addr = base;
                 if !load && list & (1 << rn8) != 0 && list & ((1 << rn8) - 1) != 0 {
                     return Err(Stop::Undefined { pc, insn: h }); // UNPREDICTABLE
@@ -621,6 +762,7 @@ impl Cpu {
                     return Err(Stop::Undefined { pc, insn: h });
                 }
                 let mut addr = self.r[13].wrapping_sub(4 * list.count_ones());
+                Self::aligned(pc, addr, 4)?;
                 let new_sp = addr;
                 for i in 0..15 {
                     if list & (1 << i) != 0 {
@@ -632,19 +774,19 @@ impl Cpu {
                 self.r[13] = new_sp;
             }
             0x33 => {
-                // CPS A7.7.29: im = bit 4; affects PRIMASK (I, bit 1). FAULTMASK
-                // (F, bit 0) is not modelled yet.
-                if h & 0xF != 0x2 && h & 0xF != 0x3 && h & 0xF != 0x1 {
+                // CPS A7.7.29: im = bit 4, I (PRIMASK) = bit 1, F (FAULTMASK)
+                // = bit 0. Ignored when unprivileged.
+                if h & 0xC != 0 || h & 3 == 0 || self.in_it_block() {
                     return Err(Stop::Undefined { pc, insn: h });
                 }
-                if self.in_it_block() {
-                    return Err(Stop::Undefined { pc, insn: h });
-                }
-                if h & 0x2 != 0 {
-                    self.primask = h & 0x10 != 0;
-                }
-                if h & 0x1 != 0 {
-                    return Err(Stop::Unimplemented { pc, insn: h });
+                if self.privileged() {
+                    let disable = h & 0x10 != 0;
+                    if h & 2 != 0 {
+                        self.primask = disable;
+                    }
+                    if h & 1 != 0 && (!disable || self.may_set_faultmask()) {
+                        self.faultmask = disable;
+                    }
                 }
             }
             0x50 | 0x51 => self.r[rd] = self.r[rm].swap_bytes(), // REV 101000x
@@ -664,6 +806,7 @@ impl Cpu {
                     return Err(Stop::Undefined { pc, insn: h });
                 }
                 let mut addr = self.r[13];
+                Self::aligned(pc, addr, 4)?;
                 let mut new_pc = None;
                 let mut values = [0u32; 16];
                 for (i, slot) in values.iter_mut().enumerate() {
