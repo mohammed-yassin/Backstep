@@ -44,14 +44,14 @@ jobs:
         run: |
           set -o pipefail
           cargo clippy --locked --all-targets -- -D warnings 2>&1 | tee ../step.log \
-            || { echo "::error title=clippy::$(grep -v '^ *Compiling\|^ *Checking' ../step.log | tail -25 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')"; exit 1; }
+            || { echo "::error title=clippy::$(grep -v '^ *Compiling\|^ *Checking' ../step.log | tail -25 | sed 's/\x1b\[[0-9;]*m//g; s/%/%25/g' | awk '{printf "%s%%0A", $0}')"; exit 1; }
       - name: Tests
         working-directory: host
         shell: bash
         run: |
           set -o pipefail
           cargo test --locked 2>&1 | tee ../step.log \
-            || { echo "::error title=tests::$(grep -v '^ *Compiling\|^test .* ok$' ../step.log | tail -30 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')"; exit 1; }
+            || { echo "::error title=tests::$(grep -v '^ *Compiling\|^test .* ok$' ../step.log | tail -30 | sed 's/\x1b\[[0-9;]*m//g; s/%/%25/g' | awk '{printf "%s%%0A", $0}')"; exit 1; }
       - name: Docs
         working-directory: host
         shell: bash
@@ -60,7 +60,7 @@ jobs:
         run: |
           set -o pipefail
           cargo doc --locked --no-deps 2>&1 | tee ../step.log \
-            || { echo "::error title=docs::$(grep -v '^ *Compiling\|^ *Documenting\|^ *Checking' ../step.log | tail -25 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')"; exit 1; }
+            || { echo "::error title=docs::$(grep -v '^ *Compiling\|^ *Documenting\|^ *Checking' ../step.log | tail -25 | sed 's/\x1b\[[0-9;]*m//g; s/%/%25/g' | awk '{printf "%s%%0A", $0}')"; exit 1; }
 
   msrv:
     name: Rust minimum supported version (1.85)

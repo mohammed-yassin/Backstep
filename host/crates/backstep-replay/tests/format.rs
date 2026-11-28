@@ -140,6 +140,6 @@ fn unusable_recordings_say_why() {
         FormatError::ChunkChecksum("MMIO".into()),
         FormatError::Malformed("x".into()),
     ] {
-        assert!(!e.to_string().is_empty());
+        assert_ne!(e.to_string(), "");
     }
 }
