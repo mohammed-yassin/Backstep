@@ -8,7 +8,9 @@
 //! instruction), and at the end checks the registers and a checksum of the
 //! RAM. Any difference is reported as a divergence, not ignored.
 //!
-//! Milestone M3: programs without interrupts.
+//! Interrupts are delivered where the recording says they arrived
+//! (`docs/adr/0009-replaying-interrupts.md`). [`Timeline`] moves through
+//! a checked recording forwards and backwards (reverse execution).
 
 // Register fields are narrowed to their architectural widths on purpose,
 // and the documentation uses the manual's register names (SysTick, DWT).
@@ -17,6 +19,8 @@
 pub mod recording;
 pub mod replay;
 pub mod target;
+pub mod timeline;
 
 pub use recording::{parse, FormatError, Recording};
 pub use replay::{replay, Options, ReplayError, Report};
+pub use timeline::{Stop, Timeline, Watchpoint};

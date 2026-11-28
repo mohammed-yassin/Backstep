@@ -101,6 +101,17 @@ host/target/release/backstep inspect recording.bsr
 host/target/release/backstep replay firmware/build/qemu-mps2-an386/replay_test.elf recording.bsr
 ```
 
+Debug the recording with GDB, forwards and backwards
+([guide](docs/GDB.md)):
+
+```bash
+gdb-multiarch firmware/build/qemu-mps2-an386/replay_test.elf \
+    -ex "target remote | host/target/release/backstep gdb --stdio firmware/build/qemu-mps2-an386/replay_test.elf recording.bsr"
+(gdb) watch g_hash
+(gdb) continue
+(gdb) reverse-continue
+```
+
 ### Supported hardware
 
 | Board | Status |

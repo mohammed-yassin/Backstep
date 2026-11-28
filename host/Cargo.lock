@@ -58,6 +58,7 @@ version = "0.0.1"
 dependencies = [
  "backstep-core",
  "backstep-emu",
+ "backstep-gdb",
  "backstep-replay",
  "clap",
 ]
@@ -69,6 +70,14 @@ version = "0.0.1"
 [[package]]
 name = "backstep-emu"
 version = "0.0.1"
+
+[[package]]
+name = "backstep-gdb"
+version = "0.0.1"
+dependencies = [
+ "backstep-emu",
+ "backstep-replay",
+]
 
 [[package]]
 name = "backstep-replay"

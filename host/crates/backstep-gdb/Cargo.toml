@@ -1,0 +1,16 @@
+[package]
+name = "backstep-gdb"
+description = "GDB remote serial protocol server over a Backstep timeline: debug a recording, forwards and backwards"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+backstep-emu = { path = "../backstep-emu" }
+backstep-replay = { path = "../backstep-replay" }
+
+[lints]
+workspace = true

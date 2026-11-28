@@ -16,3 +16,5 @@ __pycache__/
 
 # Recordings made by trying the examples
 *.bsr
+# ...except the test fixtures (an ELF and the recordings made with it)
+!/host/crates/backstep-replay/tests/fixtures/*.bsr
