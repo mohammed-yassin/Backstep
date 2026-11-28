@@ -47,7 +47,10 @@ static void test_version(void)
     char buf[32];
     unsigned long v = bs_version();
 
-    CHECK_EQ_U32(v, 0x000001ul);
+    /* 0x00MMmmpp: major, minor, patch. */
+    CHECK_EQ_U32(v, ((unsigned long)BACKSTEP_VERSION_MAJOR << 16) |
+                        ((unsigned long)BACKSTEP_VERSION_MINOR << 8) |
+                        (unsigned long)BACKSTEP_VERSION_PATCH);
     (void)snprintf(buf, sizeof buf, "%d.%d.%d", BACKSTEP_VERSION_MAJOR,
                    BACKSTEP_VERSION_MINOR, BACKSTEP_VERSION_PATCH);
     g_checks++;

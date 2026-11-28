@@ -18,8 +18,9 @@ Recordings:
 
 The demo session is the M5 criterion "a reverse watchpoint stops on the
 exact instruction that corrupted memory": the line marked DEMO-BUG-STORE.
-Two more tests talk the protocol directly over TCP: no-ack mode, and
-stopping a run with Ctrl-C.
+Two more tests use TCP: GDB with `target extended-remote` (as IDEs
+connect), and the protocol spoken directly: no-ack mode, and stopping a
+run with Ctrl-C.
 
 Usage: gdb-test.py --backstep <backstep> --firmware <firmware/build/qemu-mps2-an386>
 
@@ -305,6 +306,8 @@ def main() -> int:
 
         # The protocol directly: no-ack mode, and Ctrl-C stops a run.
         results.append(raw_protocol(backstep, r["irq"]))
+        # GDB over TCP, as IDEs connect (extended-remote).
+        results.append(over_tcp(backstep, demo, bug_line))
 
     ok = all(results)
     print(f"gdb-test: {sum(results)}/{len(results)} passed")
@@ -312,11 +315,37 @@ def main() -> int:
     return 0 if ok else 1
 
 
-def raw_protocol(backstep: str, rec: Rec) -> bool:
-    """Over TCP: qSupported, no-ack mode, registers, `c` then Ctrl-C."""
+def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
+        return s.getsockname()[1]
+
+
+def over_tcp(backstep: str, rec: Rec, bug_line: int) -> bool:
+    """`backstep gdb --port`, and GDB with `target extended-remote`."""
+    port = free_port()
+    server = subprocess.Popen([backstep, "gdb", "--port", str(port), str(rec.elf), str(rec.path)],
+                              stderr=subprocess.PIPE, text=True)
+    try:
+        assert server.stderr is not None
+        while "waiting for GDB" not in server.stderr.readline():
+            pass
+        out = subprocess.run([GDB, "-batch", "-nx", "-ex", "set pagination off", "-ex", f"file {rec.elf}",
+                              "-ex", f"target extended-remote localhost:{port}", "-ex", "continue",
+                              "-ex", "watch g_rx.limit", "-ex", "reverse-continue", "-ex", "detach"],
+                             capture_output=True, text=True, timeout=120).stdout
+        ok = f"demo_overrun.c:{bug_line}" in out and "detached" in out
+        print(f"{'PASS' if ok else 'FAIL'} GDB over TCP (extended-remote): the demo's reverse watchpoint")
+        if not ok:
+            print("    " + "\n    ".join(out.strip().splitlines()[-15:]))
+        return ok
+    finally:
+        server.wait(timeout=30)
+
+
+def raw_protocol(backstep: str, rec: Rec) -> bool:
+    """Over TCP: qSupported, no-ack mode, registers, `c` then Ctrl-C."""
+    port = free_port()
     server = subprocess.Popen([backstep, "gdb", "--port", str(port), str(rec.elf), str(rec.path)],
                               stderr=subprocess.PIPE, text=True)
     try:

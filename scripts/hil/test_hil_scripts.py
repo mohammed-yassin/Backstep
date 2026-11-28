@@ -92,10 +92,10 @@ def run_case(name: str, lines: list[str], period_s: float, led: str, expect_ok: 
 
 
 def main() -> int:
-    good = ["BACKSTEP-M0 NUCLEO-F411RE blinky recorder=0.0.1 crc=CBF43926"] + [
+    good = ["BACKSTEP-M0 NUCLEO-F411RE blinky recorder=0.1.0 crc=CBF43926"] + [
         f"BACKSTEP-M0 alive {n}" for n in range(1, 6)
     ]
-    bad_crc = ["BACKSTEP-M0 NUCLEO-F411RE blinky recorder=0.0.1 crc=DEADBEEF"] + good[1:]
+    bad_crc = ["BACKSTEP-M0 NUCLEO-F411RE blinky recorder=0.1.0 crc=DEADBEEF"] + good[1:]
     gap = good[:3] + ["BACKSTEP-M0 alive 4", "BACKSTEP-M0 alive 5", "BACKSTEP-M0 alive 6"]
     cases = [
         ("healthy board passes", good, 1.0, "y", True),

@@ -17,7 +17,7 @@ Status legend: **Done** (merged, automated criteria met) ·
 | M2 | Cortex-M4 emulator | Done (hardware measurement pending) |
 | M3 | First recording and replay (no interrupts) | Done (hardware check pending) |
 | M4 | Interrupts and faults | Done (hardware check pending) |
-| M5 | GDB with step-back, v0.1 release | In progress |
+| M5 | GDB with step-back, v0.1 release | Done (v0.1.0) |
 | M6 | "Who wrote this?" queries | Planned |
 | M7 | Real-world STM32 firmware (FPU, DMA, HAL) | Planned |
 | M8 | FreeRTOS | Planned |
@@ -152,7 +152,7 @@ verified against QEMU; see [ADR 0006](adr/0006-emulator.md) and
 
 ## M5: GDB with step-back, v0.1 release
 
-**Status: in progress.**
+**Status: done** (v0.1.0).
 
 - Part 1: replay lookahead for ambiguous interrupt keys, and interrupts
   that preempted another before its stub ran
@@ -163,7 +163,11 @@ verified against QEMU; see [ADR 0006](adr/0006-emulator.md) and
   [guide](GDB.md)). `scripts/gdb-test.py` runs 30 scripted GDB sessions
   in CI, among them a reverse watchpoint that stops on the store that
   corrupted memory in `demo_overrun.c`.
-- Next: VS Code configuration, demo GIF, v0.1.0 binaries.
+- Part 3: VS Code configuration ([VSCODE.md](VSCODE.md), example
+  `launch.json` and `tasks.json`), the demo GIF (made from a real
+  session by `scripts/make-demo-gif.py`), and the release workflow that
+  builds `backstep` for Linux, macOS (Arm and Intel) and Windows when a
+  version tag is pushed. v0.1.0 is the first release.
 
 **Acceptance criteria**
 - GDB server supports continue, step, breakpoints, watchpoints,

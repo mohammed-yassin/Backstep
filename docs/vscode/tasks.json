@@ -1,0 +1,29 @@
+{
+    // Starts `backstep gdb` in the background for the launch configurations
+    // in launch.json. It checks the recording, then waits for GDB.
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "backstep gdb",
+            "type": "shell",
+            "command": "backstep",
+            "args": [
+                "gdb",
+                "${workspaceFolder}/build/firmware.elf",
+                "${workspaceFolder}/recording.bsr",
+                "--port",
+                "3333"
+            ],
+            "isBackground": true,
+            "problemMatcher": {
+                "owner": "backstep",
+                "pattern": { "regexp": "^backstep gdb: (the recording does not replay.*)$", "message": 1 },
+                "background": {
+                    "activeBegin": true,
+                    "beginsPattern": "^backstep gdb: recording checked",
+                    "endsPattern": "^backstep gdb: waiting for GDB"
+                }
+            }
+        }
+    ]
+}

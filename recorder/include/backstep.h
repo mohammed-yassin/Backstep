@@ -20,9 +20,9 @@ extern "C" {
 #endif
 
 #define BACKSTEP_VERSION_MAJOR 0
-#define BACKSTEP_VERSION_MINOR 0
-#define BACKSTEP_VERSION_PATCH 1
-#define BACKSTEP_VERSION_STRING "0.0.1"
+#define BACKSTEP_VERSION_MINOR 1
+#define BACKSTEP_VERSION_PATCH 0
+#define BACKSTEP_VERSION_STRING "0.1.0"
 
 /*
  * Backstep's own state goes in the .backstep section: outside the program's
