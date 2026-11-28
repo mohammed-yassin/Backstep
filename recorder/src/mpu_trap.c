@@ -6,6 +6,7 @@
  *
  * SPDX-License-Identifier: MIT
  */
+#include "backstep.h"
 #include "backstep_mmio.h"
 #include "thumb_ldst.h"
 
@@ -39,11 +40,12 @@
 /* Exception frame pushed by hardware, plus r4-r11 pushed by the stub. */
 enum { F_R0, F_R1, F_R2, F_R3, F_R12, F_LR, F_PC, F_XPSR };
 
-static struct bs_mmio_event *s_log;
-static uint32_t s_capacity;
-static uint32_t s_region_base = BS_MMIO_REGION_BASE;
-static uint32_t s_region_size = BS_MMIO_REGION_SIZE;
-static volatile struct bs_mmio_trap_stats s_stats;
+/* Set by bs_mmio_trap_enable_region(); in .backstep (see BS_STATE). */
+static struct bs_mmio_event *s_log BS_STATE;
+static uint32_t s_capacity BS_STATE;
+static uint32_t s_region_base BS_STATE;
+static uint32_t s_region_size BS_STATE;
+static volatile struct bs_mmio_trap_stats s_stats BS_STATE;
 
 static inline void barrier(void)
 {
@@ -153,6 +155,9 @@ static int handle(uint32_t *frame, uint32_t *callee)
             s_log[n].value = value;
             s_log[n].pc = pc;
             s_log[n].size = insn.size;
+            s_log[n].reserved[0] = 0u; /* recordings store the whole word */
+            s_log[n].reserved[1] = 0u;
+            s_log[n].reserved[2] = 0u;
         } else {
             s_stats.dropped++;
         }

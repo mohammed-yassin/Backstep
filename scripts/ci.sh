@@ -64,6 +64,9 @@ run_firmware() {
         --min-instructions 1000000
     step "Emulator: decoder and exception model line coverage >= 90%"
     scripts/emu-coverage.sh --min 90
+    step "Replay: 10 recorded polling programs replayed instruction for instruction vs QEMU; corrupted recordings detected"
+    (cd host && cargo build --locked --release -p backstep-cli)
+    make -C firmware replay-test
     step "Hardware test scripts: self-test against a simulated board"
     python3 scripts/hil/test_hil_scripts.py
 }

@@ -50,7 +50,16 @@ __attribute__((naked)) int bs_snapshot_take(struct bs_cpu_state *cpu,
         "push {r0, lr}\n\t"
         "blx r12\n\t"
         "pop {r0, lr}\n\t"
-        "mov r0, #0\n\t"
+        /* Return with a state that depends only on the snapshot, so a
+         * recording replays from it exactly: the caller's flags (and GE)
+         * as at the call, the scratch registers r1-r3 and r12 zero. */
+        "ldr r1, [r0, #64]\n\t"
+        "msr apsr_nzcvqg, r1\n\t"
+        "mov.w r1, #0\n\t"
+        "mov.w r2, #0\n\t"
+        "mov.w r3, #0\n\t"
+        "mov.w r12, #0\n\t"
+        "mov.w r0, #0\n\t"
         "bx lr\n\t");
 }
 

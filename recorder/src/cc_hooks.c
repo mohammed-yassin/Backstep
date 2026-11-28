@@ -5,13 +5,15 @@
  *
  * SPDX-License-Identifier: MIT
  */
+#include "backstep.h"
 #include "backstep_mmio.h"
 
-static struct bs_mmio_event *s_log;
-static uint32_t s_capacity;
-static uint32_t s_base;
-static uint32_t s_size; /* 0 = capture disabled */
-static volatile struct bs_mmio_trap_stats s_stats;
+/* In .backstep (see BS_STATE), zeroed at startup. */
+static struct bs_mmio_event *s_log BS_STATE;
+static uint32_t s_capacity BS_STATE;
+static uint32_t s_base BS_STATE;
+static uint32_t s_size BS_STATE; /* 0 = capture disabled */
+static volatile struct bs_mmio_trap_stats s_stats BS_STATE;
 
 void bs_cc_capture_enable(struct bs_mmio_event *log, uint32_t capacity,
                           uint32_t base, uint32_t size)
@@ -48,6 +50,9 @@ static void record(uint32_t addr, uint32_t value, uint8_t size, void *ret)
         s_log[n].value = value;
         s_log[n].pc = (uint32_t)(uintptr_t)ret;
         s_log[n].size = size;
+        s_log[n].reserved[0] = 0u; /* recordings store the whole word */
+        s_log[n].reserved[1] = 0u;
+        s_log[n].reserved[2] = 0u;
     } else {
         s_stats.dropped++;
     }

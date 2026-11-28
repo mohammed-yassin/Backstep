@@ -13,3 +13,6 @@
 __pycache__/
 *.pyc
 /tools/*/build/
+
+# Recordings made by trying the examples
+*.bsr

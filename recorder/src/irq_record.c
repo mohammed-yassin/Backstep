@@ -3,13 +3,15 @@
  *
  * SPDX-License-Identifier: MIT
  */
+#include "backstep.h"
 #include "backstep_irq.h"
 
-static struct bs_irq_event *s_log;
-static uint32_t s_capacity;
-static volatile uint32_t s_count;
-static const volatile uint32_t *s_mmio;
-static const uint32_t *s_stack_top;
+/* In .backstep (see BS_STATE). */
+static struct bs_irq_event *s_log BS_STATE;
+static uint32_t s_capacity BS_STATE;
+static volatile uint32_t s_count BS_STATE;
+static const volatile uint32_t *s_mmio BS_STATE;
+static const uint32_t *s_stack_top BS_STATE;
 
 uint32_t bs_stack_hash(const uint32_t *words, uint32_t count)
 {

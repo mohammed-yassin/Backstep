@@ -24,6 +24,19 @@ extern "C" {
 #define BACKSTEP_VERSION_PATCH 1
 #define BACKSTEP_VERSION_STRING "0.0.1"
 
+/*
+ * Backstep's own state goes in the .backstep section: outside the program's
+ * RAM, so the snapshot and the end-of-recording RAM checksum do not include
+ * it (replay never runs the capture code that changes it). The section is
+ * not loaded; the startup code zeroes it. On host builds (unit tests) it is
+ * ordinary memory.
+ */
+#if defined(__arm__)
+#define BS_STATE __attribute__((section(".backstep")))
+#else
+#define BS_STATE
+#endif
+
 /* Version as 0x00MMmmpp (major, minor, patch). */
 uint32_t bs_version(void);
 

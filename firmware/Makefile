@@ -38,6 +38,7 @@ QEMU_TRAP  := $(BUILD)/qemu-mps2-an386/mmio_trap_test.elf
 QEMU_IRQ   := $(BUILD)/qemu-mps2-an386/irq_position_test.elf
 QEMU_IRQ0  := $(BUILD)/qemu-mps2-an386/irq_position_test_O0.elf
 QEMU_SNAP  := $(BUILD)/qemu-mps2-an386/snapshot_test.elf
+QEMU_REPLAY := $(BUILD)/qemu-mps2-an386/replay_test.elf
 NUCLEO_ELF := $(BUILD)/nucleo-f411re/blinky.elf
 NUCLEO_TRAP := $(BUILD)/nucleo-f411re/mmio_trap_hw.elf
 NUCLEO_EXCL := $(BUILD)/nucleo-f411re/exclusive_hw.elf
@@ -55,8 +56,8 @@ CLANG_FLAGS := --target=arm-none-eabi -mthumb -mcpu=cortex-m4 -mfloat-abi=soft \
                -fshort-enums \
                -ffunction-sections -fdata-sections
 
-.PHONY: all clean qemu-test cc-test irq-test snapshot-test
-all: $(QEMU_ELF) $(QEMU_TRAP) $(CMP_MPU) $(QEMU_IRQ) $(QEMU_IRQ0) $(QEMU_SNAP) $(NUCLEO_ELF) $(NUCLEO_ELF:.elf=.bin) $(NUCLEO_ELF:.elf=.hex) \
+.PHONY: all clean qemu-test cc-test irq-test snapshot-test replay-test
+all: $(QEMU_ELF) $(QEMU_TRAP) $(CMP_MPU) $(QEMU_IRQ) $(QEMU_IRQ0) $(QEMU_SNAP) $(QEMU_REPLAY) $(NUCLEO_ELF) $(NUCLEO_ELF:.elf=.bin) $(NUCLEO_ELF:.elf=.hex) \
      $(NUCLEO_TRAP) $(NUCLEO_TRAP:.elf=.bin) $(NUCLEO_EXCL) $(NUCLEO_EXCL:.elf=.bin)
 
 $(BUILD)/qemu-mps2-an386/hello.elf: targets/qemu-mps2-an386/hello.c $(COMMON_SRC) targets/qemu-mps2-an386/link.ld common/semihost.h
@@ -98,6 +99,18 @@ $(QEMU_SNAP): $(QEMU_DIR)/snapshot_test.c $(COMMON_SRC) $(ROOT)/recorder/src/sna
 	$(CC) $(CFLAGS) $(LDFLAGS) -T $(QEMU_DIR)/link.ld \
 	    -Wl,-Map=$(@:.elf=.map) -o $@ $(QEMU_DIR)/snapshot_test.c \
 	    $(COMMON_SRC) $(ROOT)/recorder/src/snapshot.c -lgcc
+
+RECORD_SRC := $(ROOT)/recorder/src/record.c $(ROOT)/recorder/src/snapshot.c $(TRAP_SRC)
+$(QEMU_REPLAY): $(QEMU_DIR)/replay_test.c $(COMMON_SRC) $(RECORD_SRC) $(ROOT)/recorder/include/backstep_record.h $(ROOT)/recorder/include/backstep_snapshot.h $(QEMU_DIR)/link.ld common/qemu_test.h common/semihost.h
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -I $(ROOT)/recorder/src $(LDFLAGS) -T $(QEMU_DIR)/link.ld \
+	    -Wl,-Map=$(@:.elf=.map) -o $@ $(QEMU_DIR)/replay_test.c $(COMMON_SRC) $(RECORD_SRC) -lgcc
+	$(SIZE) $@
+
+# Needs the host tools: cargo build --release (in host/).
+replay-test: $(QEMU_REPLAY)
+	python3 $(ROOT)/scripts/replay-test.py --backstep $(ROOT)/host/target/release/backstep \
+	    --elf $(QEMU_REPLAY)
 
 snapshot-test: $(QEMU_SNAP)
 	$(ROOT)/scripts/snapshot-restore-test.sh $(QEMU_SNAP)

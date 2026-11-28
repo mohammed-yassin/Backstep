@@ -15,7 +15,7 @@ Status legend: **Done** (merged, automated criteria met) ·
 | M0 | Foundation | Done (hardware check pending) |
 | M1 | Prototypes for the risky parts | Done (hardware check pending) |
 | M2 | Cortex-M4 emulator | Done (hardware measurement pending) |
-| M3 | First recording and replay (no interrupts) | Planned |
+| M3 | First recording and replay (no interrupts) | In progress (QEMU part done) |
 | M4 | Interrupts and faults | Planned |
 | M5 | GDB with step-back, v0.1 release | Planned |
 | M6 | "Who wrote this?" queries | Planned |
@@ -105,6 +105,13 @@ verified against QEMU; see [ADR 0006](adr/0006-emulator.md) and
 - At least 90% test coverage of the instruction decoder.
 
 ## M3: First recording and replay (no interrupts)
+
+**Progress:** part 1 is done. It adds the recording format and recorder
+API, the replay engine (`backstep replay`, `backstep inspect`), and the
+QEMU acceptance test (`scripts/replay-test.py`); see
+[ADR 0008](adr/0008-recording-format.md). Part 2 brings the same check to
+the NUCLEO-F411RE: the recording sent over the UART, plus a QEMU smoke
+test of that path.
 
 **Acceptance criteria**
 - `backstep replay` reproduces 10 polling-only test programs instruction

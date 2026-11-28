@@ -54,6 +54,8 @@ keeps it small enough for a microcontroller's RAM.
 - `backstep-core`: recording format, checksums, replay engine.
 - `backstep-emu`: the Cortex-M4 emulator ([ADR 0006](adr/0006-emulator.md),
   exceptions in [ADR 0007](adr/0007-exceptions.md)).
+- `backstep-replay`: the recording format and the replay engine
+  ([ADR 0008](adr/0008-recording-format.md)).
 - `backstep-cli`: the `backstep` command.
 - `unsafe` code is forbidden in the workspace (`unsafe_code = "forbid"`).
 - The emulator is written from scratch so the whole project stays MIT
