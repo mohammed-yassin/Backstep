@@ -41,6 +41,8 @@ QEMU_SNAP  := $(BUILD)/qemu-mps2-an386/snapshot_test.elf
 QEMU_REPLAY := $(BUILD)/qemu-mps2-an386/replay_test.elf
 QEMU_REPLAY_IRQ := $(BUILD)/qemu-mps2-an386/replay_irq_test.elf
 QEMU_DEMO := $(BUILD)/qemu-mps2-an386/demo_overrun.elf
+QEMU_DEMO_STACK := $(BUILD)/qemu-mps2-an386/demo_stack.elf
+QEMU_DEMO_RACE := $(BUILD)/qemu-mps2-an386/demo_race.elf
 NUCLEO_ELF := $(BUILD)/nucleo-f411re/blinky.elf
 NUCLEO_TRAP := $(BUILD)/nucleo-f411re/mmio_trap_hw.elf
 NUCLEO_EXCL := $(BUILD)/nucleo-f411re/exclusive_hw.elf
@@ -60,8 +62,8 @@ CLANG_FLAGS := --target=arm-none-eabi -mthumb -mcpu=cortex-m4 -mfloat-abi=soft \
                -fshort-enums \
                -ffunction-sections -fdata-sections
 
-.PHONY: all clean qemu-test cc-test irq-test snapshot-test replay-test replay-irq-test gdb-test
-all: $(QEMU_ELF) $(QEMU_TRAP) $(CMP_MPU) $(QEMU_IRQ) $(QEMU_IRQ0) $(QEMU_SNAP) $(QEMU_REPLAY) $(QEMU_REPLAY_IRQ) $(QEMU_DEMO) $(NUCLEO_ELF) $(NUCLEO_ELF:.elf=.bin) $(NUCLEO_ELF:.elf=.hex) \
+.PHONY: all clean qemu-test cc-test irq-test snapshot-test replay-test replay-irq-test gdb-test why-test
+all: $(QEMU_ELF) $(QEMU_TRAP) $(CMP_MPU) $(QEMU_IRQ) $(QEMU_IRQ0) $(QEMU_SNAP) $(QEMU_REPLAY) $(QEMU_REPLAY_IRQ) $(QEMU_DEMO) $(QEMU_DEMO_STACK) $(QEMU_DEMO_RACE) $(NUCLEO_ELF) $(NUCLEO_ELF:.elf=.bin) $(NUCLEO_ELF:.elf=.hex) \
      $(NUCLEO_TRAP) $(NUCLEO_TRAP:.elf=.bin) $(NUCLEO_EXCL) $(NUCLEO_EXCL:.elf=.bin) \
      $(NUCLEO_REC) $(NUCLEO_REC:.elf=.bin) $(NUCLEO_REC_IRQ) $(NUCLEO_REC_IRQ:.elf=.bin)
 
@@ -118,10 +120,10 @@ $(QEMU_REPLAY_IRQ): $(QEMU_DIR)/replay_irq_test.c $(COMMON_SRC) $(RECORD_SRC) $(
 	    -Wl,-Map=$(@:.elf=.map) -o $@ $(QEMU_DIR)/replay_irq_test.c $(COMMON_SRC) $(RECORD_SRC) -lgcc
 	$(SIZE) $@
 
-$(QEMU_DEMO): $(QEMU_DIR)/demo_overrun.c $(COMMON_SRC) $(RECORD_SRC) $(ROOT)/recorder/include/backstep_record.h $(ROOT)/recorder/include/backstep_irq.h $(QEMU_DIR)/link.ld common/qemu_test.h common/semihost.h
+$(BUILD)/qemu-mps2-an386/demo_%.elf: $(QEMU_DIR)/demo_%.c $(COMMON_SRC) $(RECORD_SRC) $(ROOT)/recorder/include/backstep_record.h $(ROOT)/recorder/include/backstep_irq.h $(QEMU_DIR)/link.ld common/qemu_test.h common/semihost.h
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -I $(ROOT)/recorder/src $(LDFLAGS) -T $(QEMU_DIR)/link.ld \
-	    -Wl,-Map=$(@:.elf=.map) -o $@ $(QEMU_DIR)/demo_overrun.c $(COMMON_SRC) $(RECORD_SRC) -lgcc
+	    -Wl,-Map=$(@:.elf=.map) -o $@ $< $(COMMON_SRC) $(RECORD_SRC) -lgcc
 	$(SIZE) $@
 
 # Needs the host tools: cargo build --release (in host/).
@@ -131,6 +133,10 @@ replay-test: $(QEMU_REPLAY)
 
 gdb-test: $(QEMU_REPLAY) $(QEMU_REPLAY_IRQ) $(QEMU_DEMO)
 	python3 $(ROOT)/scripts/gdb-test.py --backstep $(ROOT)/host/target/release/backstep \
+	    --firmware $(BUILD)/qemu-mps2-an386
+
+why-test: $(QEMU_REPLAY_IRQ) $(QEMU_DEMO) $(QEMU_DEMO_STACK) $(QEMU_DEMO_RACE)
+	python3 $(ROOT)/scripts/why-test.py --backstep $(ROOT)/host/target/release/backstep \
 	    --firmware $(BUILD)/qemu-mps2-an386
 
 replay-irq-test: $(QEMU_REPLAY_IRQ)

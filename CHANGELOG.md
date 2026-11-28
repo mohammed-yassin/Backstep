@@ -5,6 +5,26 @@ Versioning](https://semver.org/); before 1.0 the recording format and the
 recorder API may still change between minor versions (a recording names
 its format version, and the tools say when they cannot read it).
 
+## [Unreleased]
+
+### Added
+
+- `backstep why <variable>`: the last write to a variable before the end
+  of the recording (or `--at` a position): the instruction, source line,
+  function and context (main code or which interrupt handler), with the
+  value before and after. It also lists every earlier write, flags
+  writes through the stack pointer (a stack overflow into a global), and
+  finds lost updates (a race between an interrupt and the code it
+  interrupted). Variables are named as in C (`g_rx.limit`, `buf[3]`),
+  using the ELF's DWARF information ([guide](docs/QUERIES.md),
+  [ADR 0011](docs/adr/0011-queries.md)).
+- `backstep timeline`: every exception entry and return in a recording.
+  For a fault, it shows the causes the core recorded and the instruction
+  executed before.
+- `--json` for both.
+- Example bugs: `demo_stack.c` (a task stack overflow) and `demo_race.c`
+  (a lost update), next to `demo_overrun.c`.
+
 ## [0.1.0] - 2026-11-28
 
 The first release: record firmware on a Cortex-M4, replay it exactly on

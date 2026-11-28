@@ -73,6 +73,8 @@ run_firmware() {
     make -C firmware replay-irq-test
     step "GDB: 30 scripted sessions against backstep gdb (forwards and backwards, breakpoints, watchpoints, the demo bug)"
     make -C firmware gdb-test
+    step "Queries: backstep why and timeline trace three example bugs (overrun, stack overflow, race) to their source lines"
+    make -C firmware why-test
     step "Replay: NUCLEO-F411RE image records itself on QEMU netduinoplus2, sends the recording over USART2, replays identically"
     python3 scripts/qemu-nucleo-replay-smoke.py --backstep host/target/release/backstep \
         --elf firmware/build/nucleo-f411re/record_hw.elf

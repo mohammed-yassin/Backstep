@@ -109,6 +109,88 @@ impl Elf {
         Ok(())
     }
 
+    /// The contents of the section called `name`, if present (debug
+    /// information, for example).
+    #[must_use]
+    pub fn section(&self, name: &str) -> Option<&[u8]> {
+        let shoff = u32_at(&self.data, 32).ok()? as usize;
+        let shentsize = usize::from(u16_at(&self.data, 46).ok()?);
+        let shnum = usize::from(u16_at(&self.data, 48).ok()?);
+        let shstrndx = usize::from(u16_at(&self.data, 50).ok()?);
+        let names = u32_at(&self.data, shoff + shstrndx * shentsize + 16).ok()? as usize;
+        for i in 0..shnum {
+            let sh = shoff + i * shentsize;
+            let name_off = u32_at(&self.data, sh).ok()? as usize;
+            let start = names + name_off;
+            let end = start + self.data.get(start..)?.iter().position(|&b| b == 0)?;
+            if &self.data[start..end] != name.as_bytes() {
+                continue;
+            }
+            if u32_at(&self.data, sh + 4).ok()? == 8 {
+                return Some(&[]); // SHT_NOBITS
+            }
+            let off = u32_at(&self.data, sh + 16).ok()? as usize;
+            let size = u32_at(&self.data, sh + 20).ok()? as usize;
+            return self.data.get(off..off + size);
+        }
+        None
+    }
+
+    /// Function symbols from `.symtab`: (name, address without the Thumb
+    /// bit, size), sorted by address.
+    #[must_use]
+    pub fn functions(&self) -> Vec<(String, u32, u32)> {
+        let mut out = Vec::new();
+        let Some(shoff) = u32_at(&self.data, 32).ok().map(|v| v as usize) else {
+            return out;
+        };
+        let (Ok(shentsize), Ok(shnum)) = (u16_at(&self.data, 46), u16_at(&self.data, 48)) else {
+            return out;
+        };
+        let (shentsize, shnum) = (usize::from(shentsize), usize::from(shnum));
+        for i in 0..shnum {
+            let sh = shoff + i * shentsize;
+            if u32_at(&self.data, sh + 4).ok() != Some(2) {
+                continue; // SHT_SYMTAB
+            }
+            let (Ok(off), Ok(size), Ok(link)) = (
+                u32_at(&self.data, sh + 16),
+                u32_at(&self.data, sh + 20),
+                u32_at(&self.data, sh + 24),
+            ) else {
+                continue;
+            };
+            let Ok(strtab) = u32_at(&self.data, shoff + link as usize * shentsize + 16) else {
+                continue;
+            };
+            for s in (off as usize..(off + size) as usize).step_by(16) {
+                let info = self.data.get(s + 12).copied().unwrap_or(0);
+                if info & 0xF != 2 {
+                    continue; // STT_FUNC
+                }
+                let (Ok(name_off), Ok(value), Ok(sz)) = (
+                    u32_at(&self.data, s),
+                    u32_at(&self.data, s + 4),
+                    u32_at(&self.data, s + 8),
+                ) else {
+                    continue;
+                };
+                let start = strtab as usize + name_off as usize;
+                let Some(len) = self
+                    .data
+                    .get(start..)
+                    .and_then(|d| d.iter().position(|&b| b == 0))
+                else {
+                    continue;
+                };
+                let name = String::from_utf8_lossy(&self.data[start..start + len]).into_owned();
+                out.push((name, value & !1, sz));
+            }
+        }
+        out.sort_by_key(|f| f.1);
+        out
+    }
+
     /// Value of a symbol from `.symtab`, if present.
     #[must_use]
     pub fn symbol(&self, name: &str) -> Option<u32> {

@@ -18,7 +18,7 @@ Status legend: **Done** (merged, automated criteria met) ·
 | M3 | First recording and replay (no interrupts) | Done (hardware check pending) |
 | M4 | Interrupts and faults | Done (hardware check pending) |
 | M5 | GDB with step-back, v0.1 release | Done (v0.1.0; binaries published when the tag is pushed) |
-| M6 | "Who wrote this?" queries | Planned |
+| M6 | "Who wrote this?" queries | Done |
 | M7 | Real-world STM32 firmware (FPU, DMA, HAL) | Planned |
 | M8 | FreeRTOS | Planned |
 | M9 | Field flight recorder | Planned |
@@ -177,6 +177,16 @@ verified against QEMU; see [ADR 0006](adr/0006-emulator.md) and
 - VS Code configuration documented; demo GIF; v0.1.0 binaries released.
 
 ## M6: "Who wrote this?" queries
+
+**Status: done.** `backstep why <variable>` and `backstep timeline`, both
+with `--json` ([guide](QUERIES.md), [ADR 0011](adr/0011-queries.md)).
+`scripts/why-test.py` records three example bugs on QEMU and checks the
+answers point at the lines marked in their sources:
+- a buffer overrun in an interrupt handler (`demo_overrun.c`);
+- a task stack overflowing into its state (`demo_stack.c`);
+- a lost update between the main code and an interrupt (`demo_race.c`).
+
+It also checks a crash's fault, its cause, and the call that led to it.
 
 **Acceptance criteria**
 - `backstep why <variable>`, interrupt/fault timeline, JSON output.
