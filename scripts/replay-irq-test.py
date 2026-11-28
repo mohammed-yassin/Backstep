@@ -14,6 +14,10 @@ main code (checksums, a sort, recursion, peripheral polling, flag waits).
      have been seen.
   2. Crash runs: the timer 1 handler corrupts a function pointer, the main
      code faults, and the HardFault ends the recording. These replay too.
+     Ambiguous runs: the main code also spins in a loop whose iterations
+     the interrupt key cannot tell apart (only a counter in RAM differs);
+     replay must find the right iteration by going back (lookahead), and
+     report that it did.
   3. Traces: a few shorter runs with an instruction trace (-d cpu,exec);
      QEMU's states from the start of the recording to its end must equal the
      replay's, state for state (r0-r15, xPSR), handlers included. Left out
@@ -180,6 +184,7 @@ def main() -> int:
     ap.add_argument("--runs", type=int, default=100)
     ap.add_argument("--crashes", type=int, default=10)
     ap.add_argument("--traces", type=int, default=4)
+    ap.add_argument("--ambiguous", type=int, default=20)
     args = ap.parse_args()
     backstep = str(Path(args.backstep).resolve())
     elf = Path(args.elf).resolve()
@@ -247,7 +252,25 @@ def main() -> int:
         check(crashed == args.crashes, f"{crashed} of {args.crashes} crash recordings (ended by the "
               "HardFault) replay exactly")
 
-        for s, arg in [(s, f"s={s}:n=24") for s in range(1, args.traces + 1)] + [(1, "c=1:n=24")]:
+        found, retried = 0, 0
+        for s in range(1, args.ambiguous + 1):
+            work = Path(tmp) / f"a{s}"
+            work.mkdir()
+            serial = qemu(elf, f"a={s}", work)
+            rec = work / "recording.bsr"
+            r = subprocess.run([backstep, "replay", str(elf), str(rec)], capture_output=True, text=True)
+            if "RESULT PASS" not in serial or r.returncode != 0:
+                check(False, f"ambiguous seed {s}: replay", (r.stderr or serial).strip()[-300:])
+                continue
+            found += 1
+            m = re.search(r"(\d+) interrupt placements retried", r.stdout)
+            retried += int(m.group(1)) if m else 0
+        check(found == args.ambiguous and (retried > 0 or args.ambiguous == 0),
+              f"{found} of {args.ambiguous} recordings with ambiguous interrupt keys replay exactly "
+              f"({retried} placements retried)")
+
+        for s, arg in [(s, f"s={s}:n=24") for s in range(1, args.traces + 1)] + [(1, "c=1:n=24"),
+                                                                                (1, "a=1:n=24")]:
             work = Path(tmp) / f"t{s}{arg[0]}"
             work.mkdir()
             log = work / "qemu.log"

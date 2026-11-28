@@ -1,5 +1,6 @@
 //! Re-run a recording on the emulator and check it.
 
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::io::Write;
 
@@ -49,6 +50,9 @@ pub struct Report {
     pub interrupts: usize,
     /// CRC-32 of the end RAM regions (equal to the recording's).
     pub ram_crc32: u32,
+    /// Times replay went back to deliver an interrupt at a later match of
+    /// its key, because an earlier match led to a divergence.
+    pub retries: u32,
 }
 
 /// Why a replay failed.
@@ -247,7 +251,7 @@ const TRAP_STACK_BYTES: u32 = 520;
 /// Replay does not run the capture, so it writes the same bytes: replayed
 /// memory then equals the chip's, dead stack included, which interrupt
 /// positions (their stack hash) depend on.
-fn leave_trap_frame(cpu: &mut Cpu, frame_on_psp: bool) {
+fn leave_trap_frame(cpu: &mut Cpu, frame_on_psp: bool) -> u32 {
     let sp = cpu.r[13];
     let realign = cpu.scs.ccr & (1 << 9) != 0 && sp & 4 != 0;
     let frame = sp.wrapping_sub(0x20) & !(u32::from(realign) << 2);
@@ -256,13 +260,25 @@ fn leave_trap_frame(cpu: &mut Cpu, frame_on_psp: bool) {
         cpu.r[0], cpu.r[1], cpu.r[2], cpu.r[3], cpu.r[12], cpu.r[14], cpu.r[15], xpsr,
     ];
     for (i, w) in words.iter().enumerate() {
-        cpu.memory.write(frame.wrapping_add(4 * i as u32), 4, *w);
+        cpu.memory.poke(frame.wrapping_add(4 * i as u32), 4, *w);
     }
     let top = if frame_on_psp { cpu.msp() } else { frame };
     for i in 0..TRAP_STACK_BYTES / 4 {
         cpu.memory
-            .write(top.wrapping_sub(TRAP_STACK_BYTES).wrapping_add(4 * i), 4, 0);
+            .poke(top.wrapping_sub(TRAP_STACK_BYTES).wrapping_add(4 * i), 4, 0);
     }
+    top
+}
+
+/// The registers the capture handler's stub leaves when it returns (see
+/// `BS_FAULT_STUB` in `recorder/src/mpu_trap.c`): r0 = its stack top - 32,
+/// r1-r3 and r12 zero, and the flags of its last `cmp` (Z and C set).
+fn capture_exit_registers(cpu: &mut Cpu, top: u32) {
+    cpu.r[0] = top.wrapping_sub(32);
+    for i in [1, 2, 3, 12] {
+        cpu.r[i] = 0;
+    }
+    cpu.flags = backstep_emu::alu::Flags::from_bits(0x6000_0000 | (cpu.xpsr() & (1 << 27)));
 }
 
 impl Bus for ReplayBus<'_> {
@@ -432,7 +448,7 @@ fn restore(cpu: &mut Cpu, rec: &Recording) {
 fn stack_hash(cpu: &Cpu, sp: u32, top: u32) -> u32 {
     let words = (top.saturating_sub(sp) / 4).min(32);
     (0..words).fold(0x811C_9DC5u32, |h, i| {
-        let w = cpu.memory.read(sp.wrapping_add(4 * i), 4).unwrap_or(0);
+        let w = cpu.memory.peek(sp.wrapping_add(4 * i), 4).unwrap_or(0);
         (h ^ w).wrapping_mul(0x0100_0193)
     })
 }
@@ -481,40 +497,6 @@ fn compare_end(cpu: &Cpu, end: &CpuState) -> Result<(), ReplayError> {
     mismatch("control", end.control & 3, cpu.control & 3)
 }
 
-/// Deliver every recorded interrupt whose position the core is at (more
-/// than one when an interrupt preempted another's first instruction).
-fn deliver_interrupts(
-    cpu: &mut Cpu,
-    bus: &mut ReplayBus<'_>,
-    rec: &Recording,
-    next_irq: &mut usize,
-    exceptions: usize,
-) -> Result<(), ReplayError> {
-    while let Some(e) = rec.irqs.get(*next_irq) {
-        if !at_position(cpu, e, bus.next, rec.irq_stack_top) {
-            break;
-        }
-        let number = e.exception as usize;
-        let taken = number >= 2
-            && number < exceptions
-            && cpu
-                .interrupt_now(bus, number)
-                .map_err(|stop| ReplayError::Stopped {
-                    instruction: bus.instruction,
-                    stop,
-                })?;
-        if !taken {
-            return Err(ReplayError::InterruptNotTaken {
-                instruction: bus.instruction,
-                index: *next_irq,
-                exception: e.exception,
-            });
-        }
-        *next_irq += 1;
-    }
-    Ok(())
-}
-
 /// At the end point: everything recorded was replayed, and the registers
 /// and RAM checksum are the recorded ones. Returns the RAM checksum.
 fn check_end(cpu: &Cpu, rec: &Recording, loads: usize, irqs: usize) -> Result<u32, ReplayError> {
@@ -535,7 +517,7 @@ fn check_end(cpu: &Cpu, rec: &Recording, loads: usize, irqs: usize) -> Result<u3
     let mut crc = 0;
     for &(address, len) in &rec.end.regions {
         let bytes: Vec<u8> = (0..len)
-            .map(|i| cpu.memory.read(address.wrapping_add(i), 1).unwrap_or(0) as u8)
+            .map(|i| cpu.memory.peek(address.wrapping_add(i), 1).unwrap_or(0) as u8)
             .collect();
         crc = update(crc, &bytes);
     }
@@ -549,6 +531,376 @@ fn check_end(cpu: &Cpu, rec: &Recording, loads: usize, irqs: usize) -> Result<u3
     Ok(crc)
 }
 
+/// The replayed machine at one position of the recording: the state
+/// before instruction `n`, with the interrupts due there delivered. Cheap
+/// to clone (memory pages are shared), so checkpoints are clones.
+#[derive(Debug, Clone)]
+pub(crate) struct Machine {
+    pub(crate) cpu: Cpu,
+    /// Instructions executed: the position.
+    pub(crate) n: u64,
+    /// Recorded loads used.
+    pub(crate) loads: usize,
+    /// Recorded interrupts delivered.
+    pub(crate) irqs: usize,
+    /// Peripheral stores (not recorded).
+    pub(crate) stores: u64,
+    /// If the last instruction made a trapped peripheral access: the
+    /// capture handler's stack top (see [`leave_trap_frame`]).
+    pub(crate) trap_top: Option<u32>,
+}
+
+/// Where the recorded interrupts are delivered.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Plan {
+    /// The positions of the interrupts placed so far, in order (equal when
+    /// one preempted another before its first instruction).
+    pub(crate) positions: Vec<u64>,
+    /// The next interrupt is not placed before this position: its key
+    /// matched earlier, but there the core could not take it, or the
+    /// replay diverged after it (lookahead).
+    pub(crate) not_before: u64,
+    /// When going back: the next interrupt must be placed by this
+    /// position, or this attempt has diverged too.
+    pub(crate) search_until: Option<u64>,
+    /// Chains of interrupts delivered at one position outermost first:
+    /// first index to last (see [`Engine::deliver`]).
+    pub(crate) chains: BTreeMap<usize, usize>,
+    /// The machines just before the most recent placements (at most
+    /// [`RECENT`]), to go back to: (interrupt index, machine).
+    pub(crate) recent: VecDeque<(usize, Machine)>,
+}
+
+/// The longest chain of interrupts preempting each other before their
+/// stubs ran.
+const MAX_CHAIN: usize = 8;
+/// How many recent interrupt placements replay can go back to.
+const RECENT: usize = 64;
+/// How far (instructions) replay looks for a later match of a key after
+/// going back, at least.
+const MIN_SEARCH: u64 = 2_000_000;
+/// Instructions replay may spend on going back before it reports a
+/// divergence: this many, or four times the first attempt, if more.
+const RETRY_BUDGET: u64 = 50_000_000;
+
+/// Runs a recording on the emulator.
+pub(crate) struct Engine<'r> {
+    pub(crate) rec: &'r Recording,
+    pub(crate) target: Target,
+    pub(crate) stop_pc: u32,
+    exceptions: usize,
+}
+
+impl<'r> Engine<'r> {
+    /// The engine and the machine at position 0, before delivery.
+    pub(crate) fn new(elf: &Elf, rec: &'r Recording) -> Result<(Self, Machine), ReplayError> {
+        let target =
+            target::by_id(rec.target_id).ok_or(ReplayError::UnknownTarget(rec.target_id))?;
+        let stop_pc = elf
+            .symbol("bs_snapshot_take")
+            .ok_or_else(|| ReplayError::Elf("no symbol bs_snapshot_take".into()))?
+            & !1;
+        let cpu = start(elf, rec, &target)?;
+        let exceptions = 16 + target.num_irqs;
+        let engine = Engine {
+            rec,
+            target,
+            stop_pc,
+            exceptions,
+        };
+        let machine = Machine {
+            cpu,
+            n: 0,
+            loads: 0,
+            irqs: 0,
+            stores: 0,
+            trap_top: None,
+        };
+        Ok((engine, machine))
+    }
+
+    fn bus(&self, m: &Machine) -> ReplayBus<'r> {
+        ReplayBus {
+            events: &self.rec.events,
+            next: m.loads,
+            pc: m.cpu.r[15],
+            instruction: m.n,
+            stores: m.stores,
+            accesses: 0,
+            trapped: true,
+            error: None,
+        }
+    }
+
+    /// Whether `m` is at the end of the recording.
+    pub(crate) fn at_end(&self, m: &Machine) -> bool {
+        m.cpu.r[15] == self.stop_pc
+    }
+
+    /// Deliver the interrupts due at `m`'s position. Interrupts the plan
+    /// has placed are delivered where it says; with `discover`, the next
+    /// one is delivered where its key matches (not before
+    /// `plan.not_before`) and placed in the plan.
+    pub(crate) fn deliver(
+        &self,
+        m: &mut Machine,
+        plan: &mut Plan,
+        discover: bool,
+    ) -> Result<(), ReplayError> {
+        while m.irqs < self.rec.irqs.len() {
+            let k = m.irqs;
+            let placed = k < plan.positions.len();
+            // `k..=last` are delivered here, `last` first: an interrupt
+            // that preempted another before its stub's first instruction
+            // was logged before it (ADR 0004), so such a chain is logged
+            // innermost first.
+            let last = if placed {
+                if plan.positions[k] != m.n {
+                    break;
+                }
+                plan.chains.get(&k).copied().unwrap_or(k)
+            } else if !discover || m.n < plan.not_before {
+                break;
+            } else if self.matches(m, k) {
+                k
+            } else if let Some(last) = self.chain_matching(m, k) {
+                last
+            } else {
+                break;
+            };
+            let before = (!placed).then(|| m.clone());
+            if last == k {
+                self.take(m, k)?;
+            } else {
+                // Deliver the chain outermost first; each inner key must
+                // then match at the stub entry of the one it preempted.
+                let mut t = m.clone();
+                for i in (k..=last).rev() {
+                    if i + 1 == last && !self.matches(&t, i) {
+                        if let Some(top) = t.trap_top {
+                            // On the chip the outer interrupt tail-chained
+                            // from the capture handler, so its stub began
+                            // with the capture's scratch registers.
+                            capture_exit_registers(&mut t.cpu, top);
+                        }
+                    }
+                    if !placed && i != last && !self.matches(&t, i) {
+                        return Err(ReplayError::InterruptNotTaken {
+                            instruction: m.n,
+                            index: k,
+                            exception: self.rec.irqs[k].exception,
+                        });
+                    }
+                    self.take(&mut t, i)?;
+                }
+                *m = t;
+            }
+            if let Some(before) = before {
+                plan.positions
+                    .extend(std::iter::repeat_n(m.n, last + 1 - k));
+                if last > k {
+                    plan.chains.insert(k, last);
+                }
+                plan.not_before = 0;
+                plan.search_until = None;
+                if plan.recent.len() == RECENT {
+                    plan.recent.pop_front();
+                }
+                plan.recent.push_back((k, before));
+            }
+            m.irqs = last + 1;
+        }
+        Ok(())
+    }
+
+    /// Whether the state is at the recorded position of interrupt `i`.
+    fn matches(&self, m: &Machine, i: usize) -> bool {
+        at_position(&m.cpu, &self.rec.irqs[i], m.loads, self.rec.irq_stack_top)
+    }
+
+    /// The outermost interrupt of a chain starting at `k` (each one
+    /// preempting the next before its stub ran: its xPSR names the next
+    /// one's exception and it has the same read count) whose key matches
+    /// here, if any.
+    fn chain_matching(&self, m: &Machine, k: usize) -> Option<usize> {
+        let irqs = &self.rec.irqs;
+        let mut j = k;
+        while j + 1 < irqs.len()
+            && j - k < MAX_CHAIN
+            && irqs[j].xpsr & 0x1FF == irqs[j + 1].exception
+            && irqs[j].mmio_index == irqs[j + 1].mmio_index
+        {
+            j += 1;
+            if self.matches(m, j) {
+                return Some(j);
+            }
+        }
+        None
+    }
+
+    /// Take recorded interrupt `i` now.
+    fn take(&self, m: &mut Machine, i: usize) -> Result<(), ReplayError> {
+        let exception = self.rec.irqs[i].exception;
+        let number = exception as usize;
+        let mut bus = self.bus(m);
+        let taken = number >= 2
+            && number < self.exceptions
+            && m.cpu
+                .interrupt_now(&mut bus, number)
+                .map_err(|stop| ReplayError::Stopped {
+                    instruction: m.n,
+                    stop,
+                })?;
+        if taken {
+            Ok(())
+        } else {
+            Err(ReplayError::InterruptNotTaken {
+                instruction: m.n,
+                index: i,
+                exception,
+            })
+        }
+    }
+
+    /// Execute the instruction at `m`'s position.
+    pub(crate) fn execute(&self, m: &mut Machine) -> Result<(), ReplayError> {
+        let mut bus = self.bus(m);
+        // Accesses at priority -1 or -2 (HardFault, NMI) bypass the MPU, so
+        // the capture did not see them.
+        bus.trapped = m.cpu.execution_priority() >= 0;
+        let frame_on_psp = m.cpu.ipsr == 0 && m.cpu.control & 2 != 0;
+        let result = m.cpu.step(&mut bus);
+        if let Some(e) = bus.error.take() {
+            return Err(e);
+        }
+        result.map_err(|stop| ReplayError::Stopped {
+            instruction: m.n,
+            stop,
+        })?;
+        m.loads = bus.next;
+        m.stores = bus.stores;
+        m.trap_top = (bus.accesses > 0).then(|| leave_trap_frame(&mut m.cpu, frame_on_psp));
+        m.n += 1;
+        Ok(())
+    }
+
+    /// Run from `m` to the end of the recording, delivering interrupts as
+    /// `plan` says (discovering the rest), calling `visit` at every
+    /// position.
+    pub(crate) fn run(
+        &self,
+        m: &mut Machine,
+        plan: &mut Plan,
+        max_instructions: u64,
+        visit: &mut dyn FnMut(&Machine) -> Result<(), ReplayError>,
+    ) -> Result<(), ReplayError> {
+        loop {
+            visit(m)?;
+            self.deliver(m, plan, true)?;
+            if self.at_end(m) {
+                return Ok(());
+            }
+            if plan.search_until.is_some_and(|until| m.n >= until) {
+                // The interrupt sought after going back is not found.
+                return Err(ReplayError::InterruptsLeft {
+                    delivered: m.irqs,
+                    recorded: self.rec.irqs.len(),
+                    next: self.rec.irqs[m.irqs],
+                });
+            }
+            if m.n >= max_instructions {
+                return Err(ReplayError::InstructionLimit(m.n));
+            }
+            self.execute(m)?;
+        }
+    }
+
+    /// Replay the whole recording and check it. When the replay diverges,
+    /// go back to the most recent interrupt placed and deliver it where
+    /// its key matches next instead (ADR 0004: a key may not tell loop
+    /// iterations apart), and so on back, within [`RECENT`] placements and
+    /// a budget. Returns the plan of the replay that reproduced the
+    /// recording, its end machine and the RAM checksum; otherwise the
+    /// divergence of the first attempt.
+    pub(crate) fn verify(
+        &self,
+        start: Machine,
+        max_instructions: u64,
+    ) -> Result<Verified, ReplayError> {
+        let mut plan = Plan::default();
+        let mut m = start;
+        let mut first_error: Option<ReplayError> = None;
+        let mut retries = 0;
+        let mut budget = RETRY_BUDGET;
+        let mut spent = 0u64;
+        let mut search = MIN_SEARCH;
+        loop {
+            let from = m.n;
+            let result = self
+                .run(&mut m, &mut plan, max_instructions, &mut |_| Ok(()))
+                .and_then(|()| check_end(&m.cpu, self.rec, m.loads, m.irqs));
+            let err = match result {
+                Ok(crc) => {
+                    plan.recent.clear();
+                    return Ok(Verified {
+                        plan,
+                        end: m,
+                        ram_crc32: crc,
+                        retries,
+                    });
+                }
+                Err(e) => e,
+            };
+            if first_error.is_none() {
+                budget = budget.max(4 * m.n);
+                // Search for a later match at most twice as far as the
+                // longest gap between interrupts seen so far.
+                let gap = plan
+                    .positions
+                    .windows(2)
+                    .map(|w| w[1] - w[0])
+                    .max()
+                    .unwrap_or(0);
+                search = search.max(2 * gap);
+            } else {
+                spent += m.n.saturating_sub(from);
+            }
+            let first = first_error.get_or_insert_with(|| err.clone()).clone();
+            if matches!(err, ReplayError::InstructionLimit(_)) || spent > budget {
+                return Err(first);
+            }
+            retries += 1;
+            if let ReplayError::InterruptNotTaken { instruction, .. } = err {
+                // The key matched where the core cannot take the interrupt:
+                // not its position. Nothing changed; look further on.
+                plan.not_before = instruction + 1;
+                plan.search_until = None;
+                continue;
+            }
+            // Go back to the most recent placement and deliver that
+            // interrupt where its key matches next instead: ADR 0004 found
+            // keys that loop iterations share.
+            let Some((index, before)) = plan.recent.pop_back() else {
+                return Err(first);
+            };
+            plan.positions.truncate(index);
+            plan.chains.retain(|&k, _| k < index);
+            plan.not_before = before.n + 1;
+            plan.search_until = Some(before.n + search);
+            m = before;
+        }
+    }
+}
+
+/// A replay that reproduced its recording.
+pub(crate) struct Verified {
+    pub(crate) plan: Plan,
+    pub(crate) end: Machine,
+    pub(crate) ram_crc32: u32,
+    /// Interrupts delivered later than their first key match.
+    pub(crate) retries: u32,
+}
+
 /// Replay `rec` on the firmware `elf`.
 ///
 /// The recording ends at the entry of `bs_snapshot_take` called from
@@ -557,67 +909,30 @@ fn check_end(cpu: &Cpu, rec: &Recording, loads: usize, irqs: usize) -> Result<u3
 /// # Errors
 /// [`ReplayError`] on any difference from the recording.
 pub fn replay(elf: &Elf, rec: &Recording, mut opts: Options<'_>) -> Result<Report, ReplayError> {
-    let target = target::by_id(rec.target_id).ok_or(ReplayError::UnknownTarget(rec.target_id))?;
-    let stop_pc = elf
-        .symbol("bs_snapshot_take")
-        .ok_or_else(|| ReplayError::Elf("no symbol bs_snapshot_take".into()))?
-        & !1;
-    let mut cpu = start(elf, rec, &target)?;
-    let mut bus = ReplayBus {
-        events: &rec.events,
-        next: 0,
-        pc: 0,
-        instruction: 0,
-        stores: 0,
-        accesses: 0,
-        trapped: true,
-        error: None,
-    };
-    let mut n = 0u64;
-    let mut next_irq = 0usize;
-    let exceptions = 16 + target.num_irqs;
-    loop {
-        bus.instruction = n;
-        deliver_interrupts(&mut cpu, &mut bus, rec, &mut next_irq, exceptions)?;
-        if let Some(out) = opts.trace.as_deref_mut() {
-            write_state(&cpu, out).map_err(|e| ReplayError::Elf(format!("trace: {e}")))?;
+    let (engine, start) = Engine::new(elf, rec)?;
+    let verified = engine.verify(start.clone(), opts.max_instructions)?;
+    if let Some(out) = opts.trace.as_deref_mut() {
+        // The trace of the replay that reproduced the recording.
+        let mut m = start;
+        let mut plan = verified.plan.clone();
+        loop {
+            engine.deliver(&mut m, &mut plan, false)?;
+            write_state(&m.cpu, out).map_err(|e| ReplayError::Elf(format!("trace: {e}")))?;
+            if engine.at_end(&m) {
+                break;
+            }
+            engine.execute(&mut m)?;
         }
-        if cpu.r[15] == stop_pc {
-            break;
-        }
-        if n >= opts.max_instructions {
-            return Err(ReplayError::InstructionLimit(n));
-        }
-        bus.pc = cpu.r[15];
-        bus.instruction = n;
-        bus.accesses = 0;
-        // Accesses at priority -1 or -2 (HardFault, NMI) bypass the MPU, so
-        // the capture did not see them.
-        bus.trapped = cpu.execution_priority() >= 0;
-        let frame_on_psp = cpu.ipsr == 0 && cpu.control & 2 != 0;
-        let result = cpu.step(&mut bus);
-        if let Some(e) = bus.error.take() {
-            return Err(e);
-        }
-        if let Err(stop) = result {
-            return Err(ReplayError::Stopped {
-                instruction: n,
-                stop,
-            });
-        }
-        if bus.accesses > 0 {
-            leave_trap_frame(&mut cpu, frame_on_psp);
-        }
-        n += 1;
     }
-    let crc = check_end(&cpu, rec, bus.next, next_irq)?;
+    let end = &verified.end;
     Ok(Report {
-        target,
-        instructions: n,
-        loads: bus.next,
-        stores: bus.stores,
-        interrupts: next_irq,
-        ram_crc32: crc,
+        target: engine.target,
+        instructions: end.n,
+        loads: end.loads,
+        stores: end.stores,
+        interrupts: end.irqs,
+        ram_crc32: verified.ram_crc32,
+        retries: verified.retries,
     })
 }
 

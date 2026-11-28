@@ -212,11 +212,12 @@ impl Cpu {
     /// # Panics
     /// If `n` is not an implemented exception number.
     pub fn interrupt_now(&mut self, bus: &mut dyn Bus, n: usize) -> Result<bool, Stop> {
+        let was_pending = self.scs.pending[n];
         self.set_pending(n);
         let preempts = self.highest_pending() == Some(n)
             && self.group(self.priority(n)) < self.execution_priority();
         if !preempts {
-            self.scs.pending[n] = false;
+            self.scs.pending[n] = was_pending;
             return Ok(false);
         }
         let ret = self.r[15];

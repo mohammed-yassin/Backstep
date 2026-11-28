@@ -1,6 +1,6 @@
 # ADR 0009: Replaying interrupts and faults
 
-**Status:** Accepted (M4)
+**Status:** Accepted (M4); lookahead and stub-entry chains added in M5
 
 ## Context
 
@@ -62,6 +62,34 @@ interrupt.
 there was not recorded. Replay reports it (`UnrecordedLoad`) instead of
 matching it against the next recorded load.
 
+**Lookahead (M5).** A key can match at several positions: in a loop
+whose registers, flags and stack repeat while only static RAM changes,
+every iteration has the same key (ADR 0004). Replay delivers an
+interrupt at the first match. If the replay then diverges (a load, a
+later key, or the end state), it goes back to just before the most
+recent placement and delivers that interrupt where its key matches next;
+if there is no later match, it goes back to the placement before, and so
+on. The engine keeps the machine before each of the last 64 placements
+for this; the emulator's memory is copy-on-write (1 KiB pages in 64 KiB
+blocks), so a copy costs a few hundred bytes. The search for a later
+match stops after twice the longest gap between interrupts seen (at
+least 2 M instructions), and all retries together after 50 M
+instructions or four times the first attempt; then replay reports the
+first attempt's divergence. `backstep replay` says how many placements
+it retried. A recording replayed this way still passes every check of
+ADR 0008, so a wrong choice cannot be reported as a success.
+
+**Interrupts that preempted another before its stub ran** are logged
+innermost first: the inner stub runs `bs_irq_record` before the outer
+one. Replay recognises such a chain (each event's xPSR names the next
+event's exception, with the same read count) when the next event's key
+does not match but a later one in the chain does, and delivers the
+chain outermost first, checking each inner key at the stub entry of the
+one it preempted. When the outer interrupt was tail-chained from the
+capture handler, its stub began with the capture's scratch registers
+(r0 = its stack top - 32, r1-r3 and r12 zero, Z and C set); replay sets
+them when the inner key says so, since the inner exception stacks them.
+
 **Interrupts and the recording's edges.** `bs_record_begin` masks
 interrupts from enabling the capture until after the snapshot, and
 `bs_record_end` masks them before the end snapshot. So every recorded
@@ -79,10 +107,11 @@ peripheral polling and spins on flags set by the handlers.
 
 | Check | Result |
 |---|---|
-| Seeds 1-100, 400+ interrupts each: replay exact (every load, every interrupt at its key, end registers and RAM CRC) | **100 of 100**: 41,616 interrupts, 1,814 nested, 247.9 M instructions |
+| Seeds 1-100, 400+ interrupts each: replay exact (every load, every interrupt at its key, end registers and RAM CRC) | **100 of 100**: 42,028 interrupts, 1,826 nested, 250.4 M instructions |
 | All three sources, and nesting | seen |
 | Crash runs (a handler corrupts a function pointer; the HardFault ends the recording), 10 seeds | **10 of 10** |
-| QEMU's trace vs the replay's, state for state (r0-r15, xPSR), handlers included, capture code left out; 4 seeds and a crash | identical, 1.45 M states, 57 k of them in handlers |
+| Ambiguous keys (`a=<seed>`), 20 seeds: replay exact by lookahead (M5) | **20 of 20**, 76,260 placements retried |
+| QEMU's trace vs the replay's, state for state (r0-r15, xPSR), handlers included, capture code left out; 4 seeds, a crash and an ambiguous run | identical, 1.68 M states, 80 k of them in handlers |
 | Byte flips in the IRQS chunk | 200 of 200 rejected |
 | Re-signed IRQS edits: PC, r5, read count, stack hash, exception number of the first, middle and last interrupt; one missing, one extra; stack top; dropped count | 19 of 19 detected |
 
@@ -97,14 +126,15 @@ check.
 
 ## Consequences
 
-- **No lookahead yet.** ADR 0004 found keys that cannot tell loop
-  iterations apart when the state differs only in globals. Replay takes
-  the first match. A wrong match is not silent in practice: it changes
-  the execution, and replay then fails on a load, a later key, or the end
-  registers and RAM CRC (all checked). None occurred in the runs above.
-  Rewinding to try the next match needs cheap checkpoints of the
-  emulator, which M5 builds for reverse execution. The lookahead will be
-  added there.
+- **Lookahead has limits.** It finds the right match when a wrong one
+  shows as a divergence within the next 64 placements and the budget.
+  `replay_irq_test.c`'s ambiguous mode (`a=<seed>`: a wait loop whose
+  iterations share one key, and one timer read per iteration afterwards)
+  is in CI: 20 of 20 recordings replay exactly, after thousands of
+  retries, and QEMU's trace of one equals the replay's state for state.
+  A wrong match that changes nothing the recording checks (no load, no
+  later key, not the end RAM) is replayed as if it were right; it is then
+  indistinguishable from the right one by everything recorded.
 - The trap-frame emulation encodes what the capture handler does on the
   chip. If that handler changes (its frame, or how much stack it uses),
   `leave_trap_frame` in `backstep-replay` must change with it. The
