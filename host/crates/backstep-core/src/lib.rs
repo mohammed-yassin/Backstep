@@ -4,10 +4,10 @@
 //! program (peripheral reads, interrupt arrival points, DMA transfers) and
 //! replays the exact execution on a PC, including stepping backwards.
 //!
-//! Milestone M0 provides the shared CRC-32 used to checksum CPU and memory
+//! This crate provides the shared CRC-32 used to checksum CPU and memory
 //! state, and the version information shared with the on-device recorder.
-//! The recording format, emulator and replay engine arrive in later
-//! milestones; see `docs/ROADMAP.md`.
+//! The emulator is `backstep-emu`, the recording format and replay engine
+//! `backstep-replay`; see `docs/ROADMAP.md`.
 
 pub mod crc32;
 

@@ -65,14 +65,21 @@ keeping one path for both is simpler.
 ## Consequences and open points
 
 - The replay engine (M3) loads snapshots straight into its emulator and
-  parses the same format in Rust. `scripts/snapshot_tool.py` is the
-  prototype reader.
+  parses the same format in Rust (`backstep-replay`, ADR 0008), where the
+  snapshot is the `SNAP` chunk of a recording. `scripts/snapshot_tool.py`
+  is the prototype reader.
+- *Update (M3):* `bs_snapshot_take()` now returns 0 with r1-r3 and r12
+  zero and the caller's flags (and GE) restored. The state at the start
+  of a recording then depends only on the snapshot, as an
+  instruction-for-instruction replay needs.
 - **Reads of core peripherals in the PPB** (SysTick's current value, the
   DWT cycle counter) cannot be trapped by the MPU, so ADR 0003 does not
   capture them. M3 must handle them, for example with DWT data watchpoints
   that raise a DebugMonitor exception on those few addresses, or must
   detect them and report the limitation. Until then, firmware that reads
-  them replays with a detected divergence.
+  them replays with a detected divergence. *M3 decision:* replay reports
+  such a load as unrecorded and stops (ADR 0008); capturing them with
+  watchpoints remains open.
 - FPU registers are added with floating-point support (M7). PSP-based RTOS
   thread stacks are added with FreeRTOS support (M8).
 - When a debug probe is attached, a development-time snapshot can also be

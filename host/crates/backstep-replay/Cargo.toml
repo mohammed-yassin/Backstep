@@ -1,0 +1,16 @@
+[package]
+name = "backstep-replay"
+description = "Backstep's replay engine: re-runs a recording of a microcontroller program on the emulator and checks it"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+backstep-core = { path = "../backstep-core" }
+backstep-emu = { path = "../backstep-emu" }
+
+[lints]
+workspace = true

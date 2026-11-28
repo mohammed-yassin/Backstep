@@ -51,3 +51,34 @@ fn unknown_subcommand_is_rejected() {
     let out = backstep().arg("frobnicate").output().expect("run backstep");
     assert!(!out.status.success());
 }
+
+#[test]
+fn inspect_and_replay_reject_bad_input_with_status_2() {
+    let dir = std::env::temp_dir().join(format!("backstep-cli-rec-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let bad = dir.join("bad.bsr");
+    std::fs::write(&bad, b"not a recording at all").expect("write test file");
+
+    let inspect = backstep()
+        .arg("inspect")
+        .arg(&bad)
+        .output()
+        .expect("run inspect");
+    let missing = backstep()
+        .arg("inspect")
+        .arg(dir.join("missing.bsr"))
+        .output()
+        .expect("run inspect");
+    let replay = backstep()
+        .arg("replay")
+        .arg(&bad)
+        .arg(&bad)
+        .output()
+        .expect("run replay");
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(inspect.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&inspect.stderr).contains("not a Backstep recording"));
+    assert_eq!(missing.status.code(), Some(2));
+    assert_eq!(replay.status.code(), Some(2));
+}

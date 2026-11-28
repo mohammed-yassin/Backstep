@@ -55,9 +55,16 @@ SECTIONS
     .backstep (NOLOAD) :
     {
         . = ALIGN(4);
+        _sbackstep = .;
         *(.backstep*)
         . = ALIGN(4);
+        _ebackstep = .;
     } > RAM
+
+    /* The firmware image in flash: vector table, code, .data initialisers.
+     * A recording stores its CRC-32 so replay can check the ELF matches. */
+    __backstep_image_start = ORIGIN(FLASH);
+    __backstep_image_end = LOADADDR(.data) + SIZEOF(.data);
 
     /DISCARD/ : { *(.ARM.exidx*) }
 }

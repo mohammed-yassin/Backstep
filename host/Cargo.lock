@@ -57,6 +57,8 @@ name = "backstep-cli"
 version = "0.0.1"
 dependencies = [
  "backstep-core",
+ "backstep-emu",
+ "backstep-replay",
  "clap",
 ]
 
@@ -67,6 +69,14 @@ version = "0.0.1"
 [[package]]
 name = "backstep-emu"
 version = "0.0.1"
+
+[[package]]
+name = "backstep-replay"
+version = "0.0.1"
+dependencies = [
+ "backstep-core",
+ "backstep-emu",
+]
 
 [[package]]
 name = "clap"

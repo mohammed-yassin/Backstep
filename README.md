@@ -9,7 +9,9 @@ did on the real chip, then replay that exact execution on your PC and step
 > snapshot, all verified on QEMU. M2 is done too: the replay emulator
 > executes every Thumb and Thumb-2 integer instruction and the whole
 > exception model identically to QEMU, checked over 1,000,000 instructions
-> on every change. Next is M3, the first recording replayed. See the
+> on every change. In M3 the first recordings replay: polling programs
+> recorded on QEMU are replayed by `backstep replay` instruction for
+> instruction, and corrupted recordings are rejected. See the
 > [roadmap](docs/ROADMAP.md) for what works today and what comes next.
 
 ---
@@ -82,6 +84,17 @@ Build the firmware and try the CLI:
 make -C firmware                  # QEMU and NUCLEO-F411RE images
 make -C firmware qemu-test        # run the QEMU self-test
 cd host && cargo run -p backstep-cli -- info   # host tool version and targets
+```
+
+Record a program on QEMU and replay it:
+
+```bash
+(cd host && cargo build --release)
+qemu-system-arm -machine mps2-an386 -cpu cortex-m4 -nographic \
+    -semihosting-config enable=on,target=native,arg=w=2 \
+    -kernel firmware/build/qemu-mps2-an386/replay_test.elf   # writes recording.bsr
+host/target/release/backstep inspect recording.bsr
+host/target/release/backstep replay firmware/build/qemu-mps2-an386/replay_test.elf recording.bsr
 ```
 
 ### Supported hardware

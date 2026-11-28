@@ -2,7 +2,8 @@
  * Minimal Cortex-M4 startup shared by all Backstep example and test firmware.
  *
  * - Provides the core exception vector table (entries 0..15).
- * - Copies .data from flash to RAM and zeroes .bss before calling main().
+ * - Copies .data from flash to RAM and zeroes .bss and .backstep (the
+ *   recorder's working memory) before calling main().
  * - Default handlers spin forever so a fault is visible in a debugger.
  *
  * Targets that need device interrupts (IRQ0+) can append their own table
@@ -20,6 +21,8 @@ extern uint32_t _edata;  /* end of .data in RAM */
 extern uint32_t _sbss;   /* start of .bss */
 extern uint32_t _ebss;   /* end of .bss */
 extern uint32_t _estack; /* initial stack pointer (top of RAM) */
+extern uint32_t _sbackstep; /* Backstep's working memory (not loaded) */
+extern uint32_t _ebackstep;
 
 int main(void);
 
@@ -62,6 +65,9 @@ void Reset_Handler(void)
         *dst++ = *src++;
     }
     for (dst = &_sbss; dst < &_ebss; ++dst) {
+        *dst = 0u;
+    }
+    for (dst = &_sbackstep; dst < &_ebackstep; ++dst) {
         *dst = 0u;
     }
 
