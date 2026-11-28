@@ -23,6 +23,46 @@ M0 = HERE / "m0_nucleo_f411re.py"
 M1 = HERE / "m1_nucleo_f411re.py"
 M2 = HERE / "m2_nucleo_f411re.py"
 M3 = HERE / "m3_nucleo_f411re.py"
+M4 = HERE / "m4_nucleo_f411re.py"
+
+
+def fake_recording(sources: list[int], nested: int) -> bytes:
+    """A minimal recording with an IRQS chunk (enough for the M4 script's
+    statistics; the replay itself is a stub here)."""
+    import struct
+    import zlib
+    events = b""
+    for i, exc in enumerate(sources):
+        words = [exc] + [0] * 16 + [0x01000000 | (15 if i < nested else 0), 0, 0]
+        events += struct.pack("<20I", *words)
+    payload = struct.pack("<3I", len(sources), 0, 0x20020000) + events
+    body = struct.pack("<4I", 0x43525342, 2, 16, 1) + b"IRQS" + struct.pack("<I", len(payload)) + payload
+    body += struct.pack("<I", zlib.crc32(payload))
+    return body + struct.pack("<I", zlib.crc32(body))
+
+
+def m4_console(runs: int = 20, sources=(15, 45, 46), crash: bool = True, damage_run: int = 0,
+               none_run: int = 0) -> list[str]:
+    import zlib
+    lines = ["BACKSTEP-M4 NUCLEO-F411RE interrupt record and replay test"]
+    for n in range(1, runs + 2):
+        lines.append(f"BSREC RUN {n}")
+        if n == runs + 1:
+            if not crash:
+                break
+            lines.append("crash at 0x08001000 reason 3")
+        if n == none_run:
+            lines.append("BSREC NONE loads 3000 dropped 952 interrupts 151")
+            continue
+        data = fake_recording(list(sources) * 2, 1)
+        hexed = data.hex().upper()
+        block = [hexed[i:i + 64] for i in range(0, len(hexed), 64)]
+        if n == damage_run:
+            block[1] = ("1" if block[1][0] != "1" else "2") + block[1][1:]
+        lines += [f"BSREC BEGIN {len(data)}", *block, f"BSREC END 0x{zlib.crc32(data):08X}"]
+    lines += ["PASS 20 recordings complete", "PASS crash recording complete" if crash else
+              "FAIL crash recording complete", "RESULT PASS" if crash else "RESULT FAIL"]
+    return lines
 
 
 def fake_board(master_fd: int, lines: list[str], period_s: float) -> None:
@@ -142,6 +182,29 @@ def main() -> int:
         for name, lines, period, led, expect, stub in m3_cases:
             results.append(run_case(name, lines, period, led, expect, script=M3,
                                     extra=out + ["--backstep", str(stub)]))
+
+        # M4: 20 runs and a crash run, each a recording with interrupts.
+        diverge7 = Path(tmp) / "backstep-diverge7"
+        diverge7.write_text(f"#!{sys.executable}\nimport sys\nbad = 'run-7.' in sys.argv[3]\n"
+                            "print('replay: stub') if not bad else print('replay: diverged', file=sys.stderr)\n"
+                            "sys.exit(1 if bad else 0)\n")
+        diverge7.chmod(0o755)
+        out4 = ["--out-dir", str(Path(tmp) / "m4"), "--elf", "unused.elf"]
+        m4_cases = [
+            ("m4: healthy board, 20 runs and a crash replay, passes", m4_console(), True, stubs["ok"], []),
+            ("m4: one run diverging fails", m4_console(), False, diverge7, []),
+            ("m4: a run the board could not record fails", m4_console(none_run=12), False, stubs["ok"], []),
+            ("m4: a damaged transfer fails", m4_console(damage_run=5), False, stubs["ok"], []),
+            ("m4: a run without TIM4 fails on the board", m4_console(sources=(15, 45)), False, stubs["ok"], []),
+            ("m4: ...and also overall (QEMU mode)", m4_console(sources=(15, 45)), False, stubs["ok"],
+             ["--sources-overall"]),
+            ("m4: no crash fails", m4_console(crash=False), False, stubs["ok"], []),
+            ("m4: only 19 runs fails", m4_console(runs=19), False, stubs["ok"], []),
+            ("m4: silent board fails", [], False, stubs["ok"], []),
+        ]
+        for name, lines, expect, stub, more in m4_cases:
+            results.append(run_case(name, lines, 0.002, "", expect, script=M4,
+                                    extra=out4 + ["--backstep", str(stub)] + more))
     print(f"hil script self-test: {sum(results)}/{len(results)} cases correct")
     return 0 if all(results) else 1
 

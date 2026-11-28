@@ -115,4 +115,9 @@ check.
   but the key's hash and the tests cover the main stack only (ADR 0004).
   RTOS threads come in M8.
 - The hardware criterion (20 of 20 runs on the NUCLEO-F411RE) is the
-  same test on the board; see `docs/HARDWARE_VERIFICATION.md`.
+  same test on the board: `record_irq_hw.c` (SysTick, TIM3, TIM4 and a
+  crash run) and `scripts/hil/m4_nucleo_f411re.py`; see
+  `docs/HARDWARE_VERIFICATION.md`. In CI the image runs on QEMU's
+  netduinoplus2, where all 21 recordings replay exactly; QEMU's STM32
+  timer model schedules each period later the longer the machine has
+  run, so TIM3 and TIM4 fire mostly in the first run there.
