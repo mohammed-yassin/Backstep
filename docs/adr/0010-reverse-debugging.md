@@ -93,8 +93,10 @@ It then runs **30 scripted GDB sessions** (gdb-multiarch, batch mode):
 | 22-27 | `finish`, `reverse-finish` (to the call instruction), `next`/`reverse-next`, `step`/`reverse-step`, `up` in a recursion, `advance`, `until`. |
 | 28-30 | Memory reads equal the recording's snapshot; the special registers; writes are refused and `detach` works. |
 
-A 31st check uses the protocol directly over TCP: no-ack mode, the
-registers, and Ctrl-C stopping a run.
+Two more checks use TCP. In one, GDB connects with
+`target extended-remote` (as IDEs do) and repeats the demo. The other
+speaks the protocol directly: no-ack mode, the registers, and Ctrl-C
+stopping a run.
 
 Rust tests (on every CI platform, from a recording checked into
 `host/crates/backstep-replay/tests/fixtures`):

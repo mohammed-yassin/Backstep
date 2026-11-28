@@ -54,7 +54,7 @@ dependencies = [
 
 [[package]]
 name = "backstep-cli"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "backstep-core",
  "backstep-emu",
@@ -65,15 +65,15 @@ dependencies = [
 
 [[package]]
 name = "backstep-core"
-version = "0.0.1"
+version = "0.1.0"
 
 [[package]]
 name = "backstep-emu"
-version = "0.0.1"
+version = "0.1.0"
 
 [[package]]
 name = "backstep-gdb"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "backstep-emu",
  "backstep-replay",
@@ -81,7 +81,7 @@ dependencies = [
 
 [[package]]
 name = "backstep-replay"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "backstep-core",
  "backstep-emu",

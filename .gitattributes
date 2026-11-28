@@ -1,0 +1,4 @@
+# Recordings, ELF fixtures and images are binary: no line-ending conversion.
+*.bsr binary
+*.elf binary
+*.gif binary

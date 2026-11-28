@@ -1,0 +1,93 @@
+# Builds the `backstep` host tool for Linux, macOS and Windows when a
+# version tag (v*) is pushed, and publishes them as a GitHub release with
+# the notes of that version from CHANGELOG.md. Tags are only made on main,
+# whose commits have passed CI.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build
+        working-directory: host
+        run: cargo build --locked --release -p backstep-cli --target ${{ matrix.target }}
+      - name: Check the version matches the tag
+        shell: bash
+        run: |
+          exe=host/target/${{ matrix.target }}/release/backstep
+          if [[ "${{ matrix.target }}" == *windows* ]]; then exe="$exe.exe"; fi
+          if [[ "${{ matrix.target }}" != x86_64-apple-darwin ]]; then
+            "$exe" --version
+            [[ "$("$exe" --version)" == "backstep ${GITHUB_REF_NAME#v}" ]]
+          fi
+      - name: Package
+        shell: bash
+        run: |
+          name="backstep-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            cp "host/target/${{ matrix.target }}/release/backstep.exe" "dist/$name/"
+          else
+            cp "host/target/${{ matrix.target }}/release/backstep" "dist/$name/"
+          fi
+          cp README.md LICENSE CHANGELOG.md docs/GDB.md docs/VSCODE.md "dist/$name/"
+          cd dist
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            7z a "$name.zip" "$name" > /dev/null
+          else
+            tar czf "$name.tar.gz" "$name"
+          fi
+          rm -r "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+
+  release:
+    name: Publish the release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            /^## / { on = ($0 ~ "^## \\[?" v "\\]?") ; next }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          test -s notes.md
+          (cd dist && sha256sum * > SHA256SUMS)
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "Backstep $GITHUB_REF_NAME" --notes-file notes.md --verify-tag

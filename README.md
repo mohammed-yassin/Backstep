@@ -4,19 +4,20 @@
 did on the real chip, then replay that exact execution on your PC and step
 *backwards* from a crash to the line that caused it.
 
-> **Status: pre-alpha.** Milestones M0 and M1 are done: the recorder can
-> capture peripheral reads, interrupt positions and a starting-state
-> snapshot, all verified on QEMU. M2 is done too: the replay emulator
-> executes every Thumb and Thumb-2 integer instruction and the whole
-> exception model identically to QEMU, checked over 1,000,000 instructions
-> on every change. M3 is done: polling programs recorded on QEMU (and on
-> the NUCLEO-F411RE image) are replayed by `backstep replay` instruction
-> for instruction, and corrupted recordings are rejected. M4 is done:
-> programs with nested interrupts from three sources, and crashes, replay
-> exactly in 100 of 100 QEMU runs, and the NUCLEO-F411RE image records and
-> replays 20 interrupt-driven runs and a crash. The board runs are queued
-> for hardware verification. Next is M5, GDB with step-back. See the
-> [roadmap](docs/ROADMAP.md) for what works today and what comes next.
+![Finding the store that corrupted a variable, by running backwards in GDB](docs/demo.gif)
+
+*A real session ([how it is made](scripts/make-demo-gif.py)): an
+interrupt handler overruns a buffer; after the failure, one reverse
+watchpoint finds the store that did it. Walkthrough: [docs/GDB.md](docs/GDB.md).*
+
+> **Status: v0.1.0, early.** Recording on Cortex-M4 (QEMU `mps2-an386`
+> and the NUCLEO-F411RE image), exact replay with interrupts and crashes,
+> and GDB with reverse execution all work and are tested in CI (see
+> [TESTING.md](docs/TESTING.md)). The runs on a real board are queued for
+> [hardware verification](docs/HARDWARE_VERIFICATION.md). No FPU and no
+> RTOS threads yet. Binaries: [releases](https://github.com/mohammed-yassin/Backstep/releases);
+> what changed: [CHANGELOG](CHANGELOG.md); what comes next:
+> [roadmap](docs/ROADMAP.md).
 
 ---
 
@@ -63,6 +64,21 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design.
 | `firmware/` | Example and test firmware for QEMU and NUCLEO-F411RE |
 | `scripts/` | CI, QEMU and hardware-in-the-loop test scripts |
 | `docs/` | Roadmap, architecture, testing strategy, design decisions |
+
+## Install
+
+Download `backstep` for Linux, macOS or Windows from the
+[releases](https://github.com/mohammed-yassin/Backstep/releases) (each
+archive also holds the GDB and VS Code guides), or build it from source:
+
+```bash
+cd host && cargo build --release      # host/target/release/backstep
+```
+
+To record your own firmware, add the C99 recorder in `recorder/` to the
+build; `firmware/targets/` has complete examples for QEMU and the
+NUCLEO-F411RE. Debugging needs GDB with Arm support (`gdb-multiarch` or
+`arm-none-eabi-gdb`).
 
 ## Building and testing
 

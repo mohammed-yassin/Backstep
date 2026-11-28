@@ -44,3 +44,14 @@ Thumb-2 data-processing instructions`.
 If a change affects behaviour on real boards, add or update a script in
 `scripts/hil/`, a self-test case in `scripts/hil/test_hil_scripts.py`,
 and an entry in `docs/HARDWARE_VERIFICATION.md`.
+
+## Releases
+
+1. Add the version's section to `CHANGELOG.md` (`## [x.y.z] - date`) and
+   set the version in `host/Cargo.toml` and in `recorder/include/backstep.h`
+   (the tests check they agree), in a pull request.
+2. After it is merged, tag `main`: `git tag vx.y.z && git push origin vx.y.z`.
+3. `.github/workflows/release.yml` builds `backstep` for Linux, macOS (Arm
+   and Intel) and Windows, checks each binary reports the tag's version,
+   and publishes the release with that changelog section and SHA-256 sums.
+

@@ -1,0 +1,36 @@
+{
+    // Debug a Backstep recording in VS Code. Copy this file (and
+    // tasks.json) to your project's .vscode/ folder and adjust the paths:
+    // the ELF must be the firmware that was recorded, with debug info.
+    // See docs/VSCODE.md.
+    "version": "0.2.0",
+    "configurations": [
+        {
+            // With the Cortex-Debug extension (marus25.cortex-debug).
+            "name": "Backstep: debug recording (Cortex-Debug)",
+            "type": "cortex-debug",
+            "request": "attach",
+            "servertype": "external",
+            "gdbTarget": "localhost:3333",
+            "executable": "${workspaceFolder}/build/firmware.elf",
+            "gdbPath": "gdb-multiarch",
+            "preLaunchTask": "backstep gdb",
+            // Nothing to reset or halt: the recording is history.
+            "overrideAttachCommands": [],
+            "showDevDebugOutput": "none"
+        },
+        {
+            // With Microsoft's C/C++ extension (ms-vscode.cpptools).
+            "name": "Backstep: debug recording (C/C++)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/firmware.elf",
+            "cwd": "${workspaceFolder}",
+            "MIMode": "gdb",
+            "miDebuggerPath": "gdb-multiarch",
+            "miDebuggerServerAddress": "localhost:3333",
+            "stopAtConnect": true,
+            "preLaunchTask": "backstep gdb"
+        }
+    ]
+}
