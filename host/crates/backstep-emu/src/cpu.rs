@@ -7,7 +7,10 @@
 use crate::alu::{add_with_carry, decode_imm_shift, shift_c, Flags, ShiftType};
 use crate::memory::{Bus, Fault, Memory};
 
+pub mod exceptions;
 mod thumb32;
+
+use exceptions::{cfsr, ExceptionStats, Scs};
 
 /// Why execution stopped. Every case leaves the CPU state as it was
 /// before the stopping instruction.
@@ -20,7 +23,8 @@ pub enum Stop {
         /// Immediate operand.
         imm: u8,
     },
-    /// `SVC #imm` (exceptions are emulated from milestone M2, part 3).
+    /// `SVC #imm`, when exceptions are not emulated (`Cpu::exceptions`
+    /// false); otherwise SVC is taken as the SVCall exception.
     Svc {
         /// Address of the instruction.
         pc: u32,
@@ -64,14 +68,50 @@ pub enum Stop {
         value: u32,
     },
     /// An unaligned access by an instruction that requires alignment
-    /// (LDM/STM/PUSH/POP, LDRD/STRD, LDREX/STREX): a `UsageFault` on the
-    /// real core.
+    /// (LDM/STM/PUSH/POP, LDRD/STRD, LDREX/STREX, or any access with
+    /// CCR.UNALIGN_TRP): a `UsageFault` on the real core.
     Unaligned {
         /// Address of the instruction.
         pc: u32,
         /// The address accessed.
         address: u32,
     },
+    /// SDIV/UDIV by zero with CCR.DIV_0_TRP set.
+    DivideByZero {
+        /// Address of the instruction.
+        pc: u32,
+    },
+    /// Lockup: a fault at priority -1 or higher (in `HardFault`, NMI, or
+    /// with FAULTMASK set) that cannot be escalated (B1.5.15).
+    Lockup {
+        /// Address of the faulting instruction.
+        pc: u32,
+    },
+    /// A situation this version does not emulate (named in `what`), such
+    /// as a fault during exception stacking. Replay stops instead of
+    /// guessing.
+    Unsupported {
+        /// Address of the instruction.
+        pc: u32,
+        /// What is not supported.
+        what: &'static str,
+    },
+}
+
+/// The stops that the exception model turns into faults or SVC when
+/// `Cpu::exceptions` is on: (exception number, CFSR bits, return address
+/// is the next instruction).
+fn as_exception(stop: Stop) -> Option<(usize, u32, bool)> {
+    use exceptions::{BUS_FAULT, SVCALL, USAGE_FAULT};
+    match stop {
+        Stop::Svc { .. } => Some((SVCALL, 0, true)),
+        Stop::Undefined { .. } => Some((USAGE_FAULT, cfsr::UNDEFINSTR, false)),
+        Stop::InvalidState { .. } => Some((USAGE_FAULT, cfsr::INVSTATE, false)),
+        Stop::Unaligned { .. } => Some((USAGE_FAULT, cfsr::UNALIGNED, false)),
+        Stop::DivideByZero { .. } => Some((USAGE_FAULT, cfsr::DIVBYZERO, false)),
+        Stop::BusFault { .. } => Some((BUS_FAULT, 0, false)),
+        _ => None,
+    }
 }
 
 /// The core: registers, flags and memory.
@@ -111,11 +151,30 @@ pub struct Cpu {
     /// Implemented bits of an exception priority (0xF0 on STM32F4, which
     /// implements 4 bits; 0xFF, all 8 bits, in QEMU's `mps2-an386`).
     pub priority_mask: u8,
+    /// EPSR.T: executing with it clear raises a UsageFault (INVSTATE).
+    pub thumb: bool,
+    /// Emulate exceptions (the default): faults, SVC and pended
+    /// exceptions are taken as on the real core. When false, `step`
+    /// stops at them instead, which unit tests and "stop on fault"
+    /// debugging use.
+    pub exceptions: bool,
+    /// Exception state and the SCB/NVIC registers.
+    pub scs: Scs,
+    /// Exception event counters.
+    pub stats: ExceptionStats,
     /// RAM and flash.
     pub memory: Memory,
     /// Instructions executed (including ones skipped by IT).
     pub instructions: u64,
+    /// `EXC_RETURN` loaded into the PC by the current instruction.
+    exc_return: Option<u32>,
+    /// The current stop is an instruction-fetch bus error.
+    fetch_fault: bool,
 }
+
+/// External interrupts of a new [`Cpu`] (enough for every STM32F4; the
+/// trace tool sets QEMU `mps2-an386`'s 32).
+pub const DEFAULT_IRQS: usize = 96;
 
 type Exec = Result<(), Stop>;
 
@@ -132,6 +191,7 @@ struct Registers {
     control: u32,
     sp_banked: u32,
     monitor: Option<u32>,
+    thumb: bool,
 }
 
 impl Cpu {
@@ -152,8 +212,14 @@ impl Cpu {
             monitor: None,
             exclusive_tags_address: true,
             priority_mask: 0xFF,
+            thumb: true,
+            exceptions: true,
+            scs: Scs::new(DEFAULT_IRQS),
+            stats: ExceptionStats::default(),
             memory,
             instructions: 0,
+            exc_return: None,
+            fetch_fault: false,
         }
     }
 
@@ -174,6 +240,8 @@ impl Cpu {
         self.r[13] = sp & !3;
         self.r[14] = 0xFFFF_FFFF;
         self.r[15] = pc & !1;
+        self.thumb = pc & 1 != 0;
+        self.scs = Scs::new(self.scs.num_irqs);
         self.flags = Flags::default();
         self.it = 0;
         self.ipsr = 0;
@@ -192,7 +260,7 @@ impl Cpu {
     pub fn xpsr(&self) -> u32 {
         let it = u32::from(self.it);
         self.flags.to_bits()
-            | (1 << 24)
+            | (u32::from(self.thumb) << 24)
             | ((it & 3) << 25)
             | ((it >> 2) << 10)
             | (u32::from(self.ge) << 16)
@@ -248,14 +316,22 @@ impl Cpu {
     }
 
     fn read(&mut self, bus: &mut dyn Bus, pc: u32, address: u32, size: u8) -> Result<u32, Stop> {
+        self.unaligned_trap(pc, address, size)?;
         if let Some(v) = self.memory.read(address, size) {
             return Ok(v);
+        }
+        if self.exceptions && Self::is_scs(address) {
+            return self.scs_read(pc, address, size);
         }
         bus.read(address, size)
             .map_err(|fault| Stop::BusFault { pc, fault })
     }
 
     fn write(&mut self, bus: &mut dyn Bus, pc: u32, address: u32, size: u8, value: u32) -> Exec {
+        self.unaligned_trap(pc, address, size)?;
+        if self.exceptions && Self::is_scs(address) {
+            return self.scs_write(pc, address, size, value);
+        }
         match self.memory.write(address, size, value) {
             Some(true) => Ok(()),
             Some(false) => Err(Stop::BusFault {
@@ -272,21 +348,93 @@ impl Cpu {
         }
     }
 
-    /// Execute one instruction.
+    /// CCR.UNALIGN_TRP: every unaligned halfword or word access faults.
+    fn unaligned_trap(&self, pc: u32, address: u32, size: u8) -> Exec {
+        if self.exceptions
+            && self.scs.ccr & exceptions::ccr::UNALIGN_TRP != 0
+            && address % u32::from(size) != 0
+        {
+            return Err(Stop::Unaligned { pc, address });
+        }
+        Ok(())
+    }
+
+    /// Execute one instruction, then take an exception if one is due.
+    ///
+    /// With [`Cpu::exceptions`] on, a fault or SVC enters its handler
+    /// instead (the instruction has no other effect, except that SVC
+    /// completes), an instruction that loads `EXC_RETURN` into the PC
+    /// returns from the exception, and afterwards the highest pending
+    /// exception is taken if it can preempt.
+    ///
+    /// # Errors
+    /// [`Stop`] if execution cannot continue (breakpoint, lockup,
+    /// unimplemented or unsupported cases, or any fault when exceptions
+    /// are off); the state is then unchanged.
+    pub fn step(&mut self, bus: &mut dyn Bus) -> Exec {
+        let pc = self.r[15];
+        self.exc_return = None;
+        self.fetch_fault = false;
+        match self.execute(bus) {
+            Ok(()) => {}
+            Err(stop) if self.exceptions => {
+                let Some((n, mut bits, after)) = as_exception(stop) else {
+                    return Err(stop);
+                };
+                let ret = if after {
+                    // SVC completes before the exception: the return
+                    // address is the next instruction, with ITSTATE advanced.
+                    if self.in_it_block() {
+                        self.it_advance();
+                    }
+                    self.instructions += 1;
+                    pc + 2
+                } else {
+                    pc
+                };
+                if let Stop::BusFault { fault, .. } = stop {
+                    if self.fetch_fault {
+                        bits |= cfsr::IBUSERR;
+                    } else {
+                        bits |= cfsr::PRECISERR | cfsr::BFARVALID;
+                        self.scs.bfar = fault.address;
+                    }
+                }
+                self.raise(bus, n, ret, bits)?;
+                return self.take_pending(bus);
+            }
+            Err(stop) => return Err(stop),
+        }
+        if let Some(value) = self.exc_return.take() {
+            self.exception_return(bus, pc, value)?;
+        }
+        if self.exceptions {
+            self.take_pending(bus)?;
+        }
+        Ok(())
+    }
+
+    /// Execute one instruction (no exception handling).
     ///
     /// # Errors
     /// [`Stop`] if the instruction cannot be executed; the state is then
     /// unchanged.
-    pub fn step(&mut self, bus: &mut dyn Bus) -> Exec {
+    fn execute(&mut self, bus: &mut dyn Bus) -> Exec {
         let pc = self.r[15];
-        let fetch = |cpu: &Cpu, address: u32| {
-            cpu.memory.read(address, 2).ok_or(Stop::BusFault {
-                pc,
-                fault: Fault {
-                    address,
-                    size: 2,
-                    write: false,
-                },
+        if !self.thumb {
+            return Err(Stop::InvalidState { pc, target: pc });
+        }
+        let fetch = |cpu: &mut Cpu, address: u32| {
+            cpu.memory.read(address, 2).ok_or_else(|| {
+                cpu.fetch_fault = true;
+                Stop::BusFault {
+                    pc,
+                    fault: Fault {
+                        address,
+                        size: 2,
+                        write: false,
+                    },
+                }
             })
         };
         let hw1 = fetch(self, pc)? as u16;
@@ -340,6 +488,7 @@ impl Cpu {
             control: self.control,
             sp_banked: self.sp_banked,
             monitor: self.monitor,
+            thumb: self.thumb,
         }
     }
 
@@ -354,6 +503,8 @@ impl Cpu {
         self.control = s.control;
         self.sp_banked = s.sp_banked;
         self.monitor = s.monitor;
+        self.thumb = s.thumb;
+        self.exc_return = None;
     }
 
     /// Word alignment check for instructions that require it.
@@ -379,13 +530,23 @@ impl Cpu {
         self.flags.z = v == 0;
     }
 
-    /// `BXWritePC` / `LoadWritePC` (A2.3.1).
+    /// `BXWritePC` / `LoadWritePC` (A2.3.1). In handler mode an
+    /// `EXC_RETURN` value starts an exception return; a target with bit 0
+    /// clear branches with EPSR.T = 0, so the next instruction faults
+    /// (INVSTATE).
     fn bx_write_pc(&mut self, pc: u32, target: u32) -> Exec {
         if self.ipsr != 0 && target >> 28 == 0xF {
-            return Err(Stop::ExceptionReturn { pc, value: target });
+            if !self.exceptions {
+                return Err(Stop::ExceptionReturn { pc, value: target });
+            }
+            self.exc_return = Some(target);
+            return Ok(());
         }
         if target & 1 == 0 {
-            return Err(Stop::InvalidState { pc, target });
+            if !self.exceptions {
+                return Err(Stop::InvalidState { pc, target });
+            }
+            self.thumb = false;
         }
         self.r[15] = target & !1;
         Ok(())
@@ -670,9 +831,6 @@ impl Cpu {
                 }
                 let target = self.reg(rm, pc);
                 if op >= 0xE {
-                    if target & 1 == 0 {
-                        return Err(Stop::InvalidState { pc, target });
-                    }
                     self.r[14] = (pc + 2) | 1;
                 }
                 return self.bx_write_pc(pc, target);

@@ -1,6 +1,6 @@
 # ADR 0006: The replay emulator and how it is verified
 
-**Status:** Accepted (M2, parts 1 and 2)
+**Status:** Accepted (M2, parts 1 and 2; exceptions in [ADR 0007](0007-exceptions.md))
 
 ## Context
 
@@ -126,7 +126,11 @@ an instruction the classifier does not know fails the run.
 
 ## Consequences
 
-- Part 3 of M2 extends the same harness to exceptions; the generator
-  grows with the decoder.
-- The full M2 acceptance target (1,000,000 random instructions, zero
-  mismatches) runs as a long job in addition to the per-change CI run.
+- Part 3 of M2 extended the same harness to exceptions
+  ([ADR 0007](0007-exceptions.md)), compares memory at the end of every
+  program, and runs 1,000,000 instructions in CI. BKPT is no longer a
+  compared class: the programs' semihosting calls are now in the
+  uncompared epilogue (unit tests cover BKPT).
+- The part 1 and 2 generators never emitted 16-bit BX or BLX (register);
+  this was found while adding exceptions, and both are generated and
+  required classes now.

@@ -33,8 +33,9 @@ how, and how to run it.
 | Interrupt positions | 14,000 recorded interrupt contexts match QEMU's per-instruction trace; the key is unique or provably safe | `scripts/irq-position-test.sh`, `scripts/irq-position-check.py` |
 | Snapshot restore | A snapshot restored into a fresh QEMU continues identically; leaving out any part changes the result | `scripts/snapshot-restore-test.sh`, `scripts/snapshot_tool.py` |
 | Interrupt recorder logic | Context fields, alignment padding, stack hash, preemption before the stub's first instruction | `recorder/tests/test_irq_record.c` |
-| Emulator differential test | Random Thumb and Thumb-2 programs: every register and xPSR (flags, Q, GE, IT) identical to QEMU before every instruction; all 281 instruction classes executed | `scripts/emu-difftest.py` |
-| Emulator unit tests | Stop conditions, UNPREDICTABLE encodings, alignment faults, branch offsets beyond the test image, privilege, stack-pointer banking, exclusive-monitor failures, rollback on faults, ELF loading | `host/crates/backstep-emu` |
+| Emulator differential test | 1,000,000 instructions of random Thumb and Thumb-2 programs with exceptions: every register and xPSR (flags, Q, GE, IT, IPSR) identical to QEMU before every instruction, data and stack RAM identical at the end; all 287 instruction classes and 22 kinds of exception event (including lockup) happen | `scripts/emu-difftest.py` |
+| Emulator coverage | Lines of the decoder and exception model executed by the tests: at least 90% | `scripts/emu-coverage.sh` |
+| Emulator unit tests | Stop conditions, UNPREDICTABLE encodings, alignment faults, branch offsets beyond the test image, privilege, stack-pointer banking, exclusive-monitor failures, rollback on faults, instruction-fetch bus errors, escalation, lockup, the replay interrupt API, unsupported cases, ELF loading | `host/crates/backstep-emu` |
 | Hardware-in-the-loop | Real chip behaviour: clocks, timing, LED, replay vs real dumps | `scripts/hil/` |
 | HIL script self-tests | The hardware scripts give correct verdicts (simulated board) | `scripts/hil/test_hil_scripts.py` |
 

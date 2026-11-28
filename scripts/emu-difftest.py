@@ -23,7 +23,7 @@ blocks. Coverage is counted per class and per encoding width; the run
 fails if a required class never executed or an unknown one did.
 
 Usage: emu-difftest.py --emu <backstep-emu-trace> [--programs N] [--length L]
-                       [--seed S] [--keep DIR]
+                       [--seed S] [--jobs J] [--min-instructions M] [--keep DIR]
 
 SPDX-License-Identifier: MIT
 """
@@ -37,6 +37,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 CONDS = ["eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le"]
@@ -354,8 +355,10 @@ class Gen32(Gen):
         if kind == 22:
             return f"mrs{c} {d}, {r.choice(SYSREGS)}"
         if kind == 23:
-            reg = r.choice(["apsr_nzcvq", "apsr_g", "apsr_nzcvqg", "primask", "basepri", "basepri_max",
-                            "faultmask", "psp"])
+            regs = ["apsr_nzcvq", "apsr_g", "apsr_nzcvqg", "primask", "basepri", "basepri_max", "psp"]
+            if not getattr(self, "no_faultmask", False):
+                regs.append("faultmask")   # (a fault with FAULTMASK set locks up)
+            reg = r.choice(regs)
             return f"msr{c} {reg}, {a}"
         if kind == 24:   # PUSH.W/POP.W, one register (STR/LDR T4) or several (STMDB/LDM)
             if r.random() < 0.5:
@@ -523,8 +526,10 @@ class Gen32(Gen):
                                                      self.alu(), f"{end}:"]
         if kind == 8:   # loads into PC: POP.W, LDR.W PC, LDM
             target = self.lbl()
-            form = r.randrange(4)
+            form = r.randrange(6)
             out = [f"ldr.w r4, ={target}+1"]
+            if form >= 4:   # BX / BLX (register)
+                return out + [f"{'bx' if form == 4 else 'blx'} r4", self.alu(), f"{target}:"]
             if form == 0:
                 out += ["push.w {r3, r4}", "pop.w {r2, pc}"]
             elif form == 1:
@@ -553,11 +558,269 @@ class Gen32(Gen):
                 "isb"] + body + ["mov.w r5, #0", "msr control, r5", "isb"]
 
 
-def program(rnd: random.Random, length: int) -> str:
-    g = Gen32(rnd)
+SCS = {"ICSR": 0xE000ED04, "VTOR": 0xE000ED08, "AIRCR": 0xE000ED0C, "SCR": 0xE000ED10,
+       "CCR": 0xE000ED14, "SHPR1": 0xE000ED18, "SHPR2": 0xE000ED1C, "SHPR3": 0xE000ED20,
+       "SHCSR": 0xE000ED24, "CFSR": 0xE000ED28, "HFSR": 0xE000ED2C, "BFAR": 0xE000ED38,
+       "ISER0": 0xE000E100, "ICER0": 0xE000E180, "ISPR0": 0xE000E200, "ICPR0": 0xE000E280,
+       "IABR0": 0xE000E300, "IPR0": 0xE000E400, "IPR1": 0xE000E404, "STIR": 0xE000EF00}
+UNMAPPED = 0x30000000                 # a load from here is a precise BusFault on mps2-an386
+IRQS = 8                              # IRQ0-7 are used; vectors 16-47 all have handlers
+# Exceptions a handler may pend, in an order that only allows pending later
+# ones (so handlers cannot keep re-pending each other forever).
+PEND_ORDER = [16, 17, 18, 19, 20, 21, 22, 23, 15, 14, 2]
+
+
+class Gen3(Gen32):
+    """Exceptions: vector table, random priorities and enables, triggers
+    in thread mode (SVC, PendSV/SysTick/NMI/IRQ pending, faults, masking,
+    PSP, misaligned SP) and generated handlers that read their stack frame,
+    pend further exceptions and return in several ways."""
+
+    def vectors(self) -> list[str]:
+        names = {2: "h_nmi", 3: "h_hardfault", 4: "h_fault", 5: "h_fault", 6: "h_fault",
+                 11: "h_svc", 12: "h_spare", 14: "h_pendsv", 15: "h_systick"}
+        out = []
+        for n in range(2, 48):
+            if n in names:
+                out.append(f".word {names[n]} + 1")
+            elif n >= 16:
+                out.append(f".word h_irq{n - 16 if n < 16 + IRQS else 'x'} + 1")
+            else:
+                out.append(".word 0")
+        return out
+
+    def store(self, reg: str, value: int, size: str = "") -> list[str]:
+        return [f"ldr.w r5, =0x{SCS[reg]:08x}", f"ldr.w r4, =0x{value:08x}", f"str{size}.w r4, [r5]"]
+
+    def setup(self) -> list[str]:
+        r = self.r
+        out = []
+        out += self.store("SHPR1", r.getrandbits(24))
+        out += self.store("SHPR2", r.getrandbits(8) << 24)
+        out += self.store("SHPR3", r.getrandbits(16) << 16)
+        if r.random() < 0.3:   # equal priorities: the exception number decides
+            same = r.getrandbits(8) * 0x01010101
+            out += self.store("IPR0", same) + self.store("IPR1", same)
+            out += self.store("SHPR3", same & 0xFFFF0000)
+        else:
+            out += self.store("IPR0", r.getrandbits(32))
+            out += self.store("IPR1", r.getrandbits(32))
+        out += self.store("ISER0", r.getrandbits(IRQS) | 1)
+        out += self.store("AIRCR", 0x05FA0000 | (r.randrange(8) << 8))
+        out += self.store("SHCSR", r.choice([0, 7, r.getrandbits(3)]) << 16)
+        ccr = 0x200 if r.random() < 0.7 else 0
+        ccr |= 0x10 if r.random() < 0.5 else 0          # DIV_0_TRP
+        ccr |= 0x08 if r.random() < 0.2 else 0          # UNALIGN_TRP
+        out += self.store("CCR", ccr)
+        # With a trap enabled, random instructions can fault, and a fault with
+        # FAULTMASK set is a lockup: no random FAULTMASK writes then.
+        self.no_faultmask = bool(ccr & 0x18)
+        return out
+
+    def scs_read(self, dest: str) -> list[str]:
+        reg = self.r.choice(["ICSR", "VTOR", "AIRCR", "SCR", "CCR", "SHPR1", "SHPR2", "SHPR3",
+                             "SHCSR", "CFSR", "HFSR", "ISER0", "ISPR0", "IABR0", "IPR0", "IPR1"])
+        return [f"ldr.w r5, =0x{SCS[reg]:08x}", f"ldr.w {dest}, [r5]"]
+
+    def pend(self, after: int | None = None) -> list[str]:
+        """Make an exception pending (one later than `after` in PEND_ORDER)."""
+        r = self.r
+        choices = PEND_ORDER if after is None else PEND_ORDER[PEND_ORDER.index(after) + 1:]
+        if not choices:
+            return []
+        n = r.choice(choices)
+        if n == 2:
+            return self.store("ICSR", 1 << 31)
+        if n == 14:
+            return self.store("ICSR", 1 << 28)
+        if n == 15:
+            return self.store("ICSR", 1 << 26)
+        irq = n - 16
+        if r.random() < 0.5:
+            return self.store("STIR", irq)
+        return self.store("ISPR0", 1 << irq)
+
+    def exc_block(self) -> list[str]:
+        """A thread-mode sequence that causes or controls exceptions."""
+        r = self.r
+        kind = r.randrange(15)
+        # A fault or SVC with FAULTMASK set would lock up: clear it first.
+        if kind == 14:  # BX/BLX to an address with bit 0 clear: INVSTATE on the next instruction
+            target = self.lbl()
+            # The target is word-aligned: for a halfword-aligned one QEMU
+            # reports UNALIGNED (its ARM-state PC check comes first), where
+            # the architecture and the emulator report INVSTATE.
+            return ["cpsie f", f"ldr.w r4, ={target}", f"{r.choice(['bx', 'blx'])} r4", "nop.w",
+                    ".p2align 2", f"{target}:", r.choice(["nop.w", "nop.n"])]
+        if kind == 0:
+            return ["cpsie f", f"svc #{self.imm(0, 255)}"]
+        if kind == 1:
+            return self.pend()
+        if kind == 2:   # one or more pending while masked, then unmasked
+            mask = r.choice([["cpsid i"], ["movs.n r4, #0x40", "msr basepri, r4"]])
+            unmask = ["cpsie i"] if mask == ["cpsid i"] else ["movs.n r4, #0", "msr basepri, r4"]
+            pends = [line for _ in range(self.imm(1, 3)) for line in self.pend()]
+            return mask + pends + [self.alu()] + unmask
+        if kind == 3:   # undefined instruction (16- or 32-bit)
+            return ["cpsie f", r.choice([f"udf.w #{self.imm(0, 65535)}", f"udf.n #{self.imm(0, 255)}"])]
+        if kind == 4:   # division by zero (faults if CCR.DIV_0_TRP)
+            return ["cpsie f", "mov.w r5, #0", f"{r.choice(['sdiv', 'udiv'])} r4, r0, r5"]
+        if kind == 5:   # unaligned access by an instruction that requires alignment
+            op = r.choice(["ldrd r0, r1, [r5]", "ldm.w r5, {r0, r1}", "ldrex r0, [r5]",
+                           "strd r2, r3, [r5]"])
+            return ["cpsie f", f"add.w r5, r7, #{r.choice([1, 2, 3])}", op]
+        if kind == 6:   # precise BusFault
+            return ["cpsie f", f"mov.w r5, #0x{UNMAPPED:08x}",
+                    r.choice(["ldr.w r4, [r5]", "ldrb.w r4, [r5, #3]", "ldrh.w r4, [r5, #2]"])]
+        if kind == 7:   # exception with the stack misaligned by 4 (frame realigned)
+            return ["cpsie f", "sub.w sp, sp, #4"] + r.choice([[f"svc #{self.imm(0, 255)}"], self.pend()]) \
+                + ["add.w sp, sp, #4"]
+        if kind == 8:   # exception taken inside an IT block
+            cnd = r.choice(CONDS)
+            return ["cpsie f", "ldr.w r5, =0xE000ED04", "mov.w r4, #0x10000000",
+                    f"itt {cnd}", f"str{cnd}.w r4, [r5]", f"{self.insn32(cnd)}"]
+        if kind == 9:   # SVC inside an IT block
+            cnd = r.choice(CONDS)
+            other = self.insn(INV[cnd]) if r.random() < 0.5 else self.insn32(INV[cnd])
+            if other == "ADR":
+                other = f"nop{INV[cnd]}.n"
+            return ["cpsie f", f"ite {cnd}", f"svc{cnd} #{self.imm(0, 255)}", other]
+        if kind == 10:  # exceptions while running on the process stack
+            body = [r.choice([[f"svc #{self.imm(0, 255)}"], self.pend()]) for _ in range(self.imm(1, 2))]
+            flat = [line for part in body for line in part]
+            return ["cpsie f", "mrs r5, msp", "sub.w r5, r5, #0x800", "msr psp, r5", "mov.w r5, #2",
+                    "msr control, r5", "isb"] + flat + ["mov.w r5, #0", "msr control, r5", "isb"]
+        if kind == 11:  # enable or disable an interrupt (a pending one may now be taken)
+            reg = r.choice(["ISER0", "ICER0", "ICPR0"])
+            return self.store(reg, 1 << r.randrange(IRQS))
+        if kind == 12:
+            return self.scs_read(r.choice(["r0", "r1", "r2", "r3", "r4"]))
+        # priorities changed at run time
+        return self.store(r.choice(["IPR0", "IPR1", "SHPR3"]), r.getrandbits(32))
+
+    def safe_alu(self) -> str:
+        """For handlers: no SP/LR/PC, and no division (which can fault: a
+        fault in HardFault or NMI is a lockup)."""
+        while True:
+            text = self.alu()
+            if not re.search(r"\bsp\b|\blr\b|\bpc\b|div", text):
+                return text
+
+    def frame_pointer(self) -> list[str]:
+        return ["tst.w lr, #4", "ite eq", "mrseq r0, msp", "mrsne r0, psp"]
+
+    def skip_faulting(self) -> list[str]:
+        """Step the stacked PC over the faulting instruction (2 or 4 bytes)
+        and advance the stacked ITSTATE as the instruction would have."""
+        done, zero, store = self.lbl(), self.lbl(), self.lbl()
+        return [
+            # The stacked T bit is set again (an INVSTATE fault stacks T = 0).
+            "ldr r2, [r0, #28]", "orr.w r2, r2, #0x01000000", "str r2, [r0, #28]",
+            "ldr r1, [r0, #24]", "ldrh r2, [r1]", "lsrs r2, r2, #11", "cmp r2, #0x1d", "ite cs",
+            "addcs r1, r1, #4", "addcc r1, r1, #2", "str r1, [r0, #24]",
+            "ldr r2, [r0, #28]", "ubfx r3, r2, #25, #2", "ubfx r1, r2, #10, #6",
+            "orr.w r3, r3, r1, lsl #2", "tst.w r3, #0xF", f"beq {done}", "tst.w r3, #7", f"beq {zero}",
+            "and.w r1, r3, #0x1F", "lsl.w r1, r1, #1", "and.w r1, r1, #0x1F", "bic.w r3, r3, #0x1F",
+            "orr.w r3, r3, r1", f"b {store}", f"{zero}:", "movs r3, #0", f"{store}:",
+            "bic.w r2, r2, #0x06000000", "bic.w r2, r2, #0x0000FC00", "and.w r1, r3, #3",
+            "orr.w r2, r2, r1, lsl #25", "lsr.w r1, r3, #2", "orr.w r2, r2, r1, lsl #10",
+            "str r2, [r0, #28]", f"{done}:"]
+
+    def frame_reads(self) -> list[str]:
+        r = self.r
+        out = []
+        for _ in range(self.imm(0, 2)):
+            out.append(f"ldr r{r.choice([1, 2, 3])}, [r0, #{4 * r.randrange(8)}]")
+        if r.random() < 0.3:   # change a stacked register the interrupted code will see
+            slot = r.choice([0, 4, 8, 12, 16])
+            out += [f"ldr r1, [r0, #{slot}]", f"adds r1, #{self.imm(1, 255)}", f"str r1, [r0, #{slot}]"]
+        return out
+
+    def body(self, n: int, fixed: bool = False) -> list[str]:
+        """Random handler work: register and SCS reads, pending later
+        exceptions (not from NMI/HardFault), and instructions."""
+        r = self.r
+        out = []
+        for _ in range(self.imm(0, 3)):
+            choice = r.random()
+            if choice < 0.2:
+                out += self.scs_read(r.choice(["r1", "r2", "r3", "r4"]))
+            elif choice < 0.3:
+                out.append(f"mrs r{r.choice([1, 2, 3])}, {r.choice(['ipsr', 'xpsr', 'msp', 'psp', 'basepri', 'control'])}")
+            elif choice < 0.55 and not fixed and n in PEND_ORDER:
+                out += self.pend(after=n)
+            elif choice < 0.62 and not fixed:
+                out.append("cpsid f")   # FAULTMASK is cleared by the exception return
+            else:
+                out.append(self.safe_alu())
+        return out
+
+    def ret(self, body: list[str]) -> list[str]:
+        """Return from the handler: BX LR, POP {.., pc} or LDR pc."""
+        form = self.r.randrange(3)
+        if form == 0:
+            return body + ["bx lr"]
+        if form == 1:
+            return ["push {r4, lr}"] + body + ["pop {r4, pc}"]
+        return ["push.w {lr}"] + body + ["ldr.w pc, [sp], #4"]
+
+    def handlers(self) -> list[str]:
+        out = []
+
+        def handler(name: str, lines: list[str]) -> None:
+            out.extend([".thumb_func", f"{name}:"] + [f"    {line}" for line in lines])
+
+        # Faults: clear CFSR/HFSR (W1C, values left visible in r1/r2), skip the
+        # faulting instruction. HardFault skips only escalated faults (CFSR set),
+        # not escalated SVCs (whose stacked PC is already the next instruction).
+        for name, hard in (("h_fault", False), ("h_hardfault", True)):
+            noskip = self.lbl()
+            lines = self.frame_pointer() + ["ldr.w r3, =0xE000ED28", "ldr r1, [r3]", "str r1, [r3]",
+                                            "ldr r2, [r3, #4]", "str r2, [r3, #4]"]
+            if hard:
+                lines.append(f"cbz r1, {noskip}")
+            lines += self.skip_faulting() + [f"{noskip}:"] + self.frame_reads()
+            lines += self.ret(self.body(3, fixed=True))
+            handler(name, lines)
+        handler("h_nmi", self.frame_pointer() + self.frame_reads() + self.ret(self.body(2, fixed=True)))
+        handler("h_svc", self.frame_pointer() + self.frame_reads() + self.ret(self.body(11)))
+        handler("h_pendsv", self.frame_pointer() + self.frame_reads() + self.ret(self.body(14)))
+        handler("h_systick", self.frame_pointer() + self.frame_reads() + self.ret(self.body(15)))
+        for i in range(IRQS):
+            handler(f"h_irq{i}", self.frame_pointer() + self.frame_reads() + self.ret(self.body(16 + i)))
+        handler("h_irqx", ["bkpt 0x01"])     # never taken: IRQ8-31 are never pended
+        handler("h_spare", ["bkpt 0x02"])
+        return out + ["    .ltorg"]
+
+
+# RAM compared at the end of every program: the data buffer (with the reach
+# of negative and register offsets around it) and the stacks (MSP, PSP).
+DUMP_REGIONS = [(0x20000E00, 0x3200), (0x202F0000, 0x10100)]
+PARAMS = 0x20000100     # semihosting parameter block, outside the regions
+
+
+def epilogue(dump: str) -> list[str]:
+    """Write DUMP_REGIONS to the file `dump` with semihosting (QEMU writes it
+    on the host, backstep-emu-trace the same way), then exit."""
+    out = [".global epilogue", "epilogue:", "    cpsid i", f"    ldr.w r5, =0x{PARAMS:08x}",
+           "    ldr.w r4, =dump_name", "    str.w r4, [r5]", "    mov.w r4, #5", "    str.w r4, [r5, #4]",
+           f"    mov.w r4, #{len(dump)}", "    str.w r4, [r5, #8]", "    mov.w r0, #1", "    mov.w r1, r5",
+           "    bkpt 0xab", "    str.w r0, [r5, #12]"]
+    for base, size in DUMP_REGIONS:
+        out += [f"    ldr.w r4, =0x{base:08x}", "    str.w r4, [r5, #16]", f"    ldr.w r4, =0x{size:08x}",
+                "    str.w r4, [r5, #20]", "    mov.w r0, #5", "    add.w r1, r5, #12", "    bkpt 0xab"]
+    out += ["    mov.w r0, #2", "    add.w r1, r5, #12", "    bkpt 0xab"]
+    return out
+
+
+def program(rnd: random.Random, length: int, lockup: bool = False, dump: str = "mem.bin") -> str:
+    g = Gen3(rnd)
     lines = [".syntax unified", ".thumb", ".cpu cortex-m4",
-             ".section .vectors, \"a\"", ".word 0x20400000", ".word reset + 1",
-             ".text", ".thumb_func", ".global reset", "reset:", ".global body_start"]
+             ".section .vectors, \"a\"", ".word 0x20400000", ".word reset + 1"] + \
+        [f"    {v}" for v in g.vectors()] + \
+        [".text", ".thumb_func", ".global reset", "reset:", ".global body_start"]
+    # Exception priorities, enables, PRIGROUP and CCR traps, chosen at random.
+    lines += [f"    {t}" for t in g.setup()]
     # Initial state, loaded from the start of the data buffer so the
     # assembler cannot turn constants into other instructions: random
     # registers, r7 = buffer, r6 = word-aligned index, SP in the middle of
@@ -606,7 +869,11 @@ def program(rnd: random.Random, length: int) -> str:
                 lines.append(f"    {'nop.n' if text == 'ADR' else text}")
             lines.append(f"9{label}:")
             emitted += skip + 1
-        elif choice < 0.30:                     # 32-bit sequence (branches, exclusives, ...)
+        elif choice < 0.20:                     # exceptions
+            block = g.exc_block()
+            lines += [f"    {t}" for t in block]
+            emitted += len(block)
+        elif choice < 0.34:                     # 32-bit sequence (branches, exclusives, ...)
             block = g.block()
             lines += [f"    {t}" if not t.endswith(":") and not t.startswith(".") else t for t in block]
             emitted += sum(1 for t in block if not t.endswith(":") and not t.startswith("."))
@@ -627,8 +894,13 @@ def program(rnd: random.Random, length: int) -> str:
     label += 1
     lines += [f"    b.w 9{label}f", "    .p2align 2", "8:", "    .word 0x8badf00d", "    .word 0x0ddba11", "    .ltorg",
               f"9{label}:",
+              # Either a semihosting exit, or a fault with FAULTMASK set,
+              # which cannot be escalated: lockup (B1.5.15).
+              *(["    cpsid f", "    udf.w #0"] if lockup else []), *epilogue(dump),
               "    ldr r1, =0x20026", "    movs r0, #0x18", "    bkpt 0xab", "    .ltorg",
-              ".section .buf, \"aw\""]
+              "dump_name:", f"    .asciz \"{dump}\"", "    .p2align 2"]   # NUL-terminated (semihosting spec)
+    lines += g.handlers()
+    lines += [".section .buf, \"aw\""]
     lines += [f"    .word 0x{w:08x}" for w in init_words]
     lines += [f"    .word 0x{rnd.getrandbits(32):08x}" for _ in range(1024 - len(init_words))]
     return "\n".join(lines) + "\n"
@@ -638,17 +910,27 @@ STATE = re.compile(r"^R00=")
 
 
 def parse(text: str) -> list[tuple[int, ...]]:
-    """States from a QEMU-format trace, consecutive duplicates removed."""
+    """States from a QEMU-format trace, consecutive duplicates removed.
+
+    QEMU logs a state when it enters a translation block; if an exception
+    became pending (an NVIC write), the block is left before its
+    instruction runs, and `-d exec` logs "Stopped execution of TB chain".
+    Such a state was never executed and is dropped."""
     out: list[tuple[int, ...]] = []
     regs: list[int] = []
+    appended = False
     for line in text.splitlines():
         if line.startswith("R"):
             regs.extend(int(line[i:i + 8], 16) for i in (4, 17, 30, 43))
         elif line.startswith("XPSR="):
             state = (*regs, int(line[5:13], 16))
             regs = []
-            if not out or out[-1] != state:
+            appended = not out or out[-1] != state
+            if appended:
                 out.append(state)
+        elif line.startswith("Stopped execution of TB chain") and appended:
+            out.pop()
+            appended = False
     return out
 
 
@@ -657,9 +939,11 @@ REQUIRED16 = {
     "rors", "tst", "negs", "cmn", "orrs", "muls", "bics", "mvns", "add", "mov", "ldr", "str",
     "ldrh", "strh", "ldrb", "strb", "ldrsb", "ldrsh", "push", "pop", "stmia", "ldmia", "adr",
     "sxtb", "sxth", "uxtb", "uxth", "rev", "rev16", "revsh", "it", "b", "bcond", "cbz",
-    "cbnz", "nop", "sub", "bkpt",
+    "cbnz", "nop", "sub",
     # Inside an IT block the 16-bit data-processing forms do not set flags.
     "adc", "and", "asr", "bic", "eor", "lsl", "lsr", "mul", "mvn", "neg", "orr", "ror", "sbc",
+    # Interworking branches, and the exception-related instructions.
+    "bx", "blx", "cpsid", "cpsie", "svc", "udf",
 }
 _DP = ["and", "bic", "orr", "orn", "eor", "add", "adc", "sbc", "sub", "rsb", "mov", "mvn",
        "lsl", "lsr", "asr", "ror", "lsl imm", "lsr imm", "asr imm", "ror imm", "rrx"]
@@ -680,7 +964,7 @@ REQUIRED32 = {f"{m}.w" for m in (
         "strbt", "pld", "pli", "ldrd", "strd", "ldrex", "strex", "ldrexb", "ldrexh", "strexb",
         "strexh", "tbb", "tbh", "ldmia", "stmia", "ldmdb", "stmdb", "push", "pop", "push one",
         "pop one", "pop pc", "pop one pc", "ldmia pc", "ldr pc", "b",
-        "bcond", "bl", "nop", "yield", "sev", "dmb", "dsb", "isb", "clrex", "mrs", "msr"])}
+        "bcond", "bl", "nop", "yield", "sev", "dmb", "dsb", "isb", "clrex", "mrs", "msr", "udf"])}
 REQUIRED = REQUIRED16 | REQUIRED32 | {"conditional (IT)", "conditional (IT).w"}
 BASES = {k.removesuffix(".w") for k in REQUIRED}
 SHIFT_OPERAND = re.compile(r", (lsl|lsr|asr|ror) #\d+$|, (rrx)$")
@@ -754,8 +1038,127 @@ def mnemonic_classes(elf: Path, pcs: list[int]) -> dict[str, int]:
     return counts
 
 
+# Exception events that must happen (counted by backstep-emu-trace, whose
+# trace has just been shown identical to QEMU's).
+REQUIRED_EVENTS = {
+    "entry NMI", "entry HardFault", "entry BusFault", "entry UsageFault", "entry SVCall",
+    "entry PendSV", "entry SysTick", "entry IRQ", "nested", "tail-chained", "escalated",
+    "fault-undefinstr", "fault-invstate", "fault-unaligned", "fault-divbyzero", "fault-preciserr",
+    "realigned", "process-stack", "return-handler", "return-thread-msp", "return-thread-psp",
+    "lockup",
+}
+ENTRY_NAMES = {2: "NMI", 3: "HardFault", 4: "MemManage", 5: "BusFault", 6: "UsageFault",
+               11: "SVCall", 12: "DebugMonitor", 14: "PendSV", 15: "SysTick"}
+
+
+def events(stderr: str) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for line in stderr.splitlines():
+        if not line.startswith("STAT "):
+            continue
+        _, name, count = line.split()
+        if name.startswith("entry-"):
+            n = int(name[6:])
+            name = "entry " + ENTRY_NAMES.get(n, "IRQ" if n >= 16 else str(n))
+        out[name] = out.get(name, 0) + int(count)
+    return out
+
+
 def names() -> list[str]:
     return [f"r{i}" for i in range(13)] + ["sp", "lr", "pc", "xpsr"]
+
+
+def check_program(n: int, seed_base: int, length: int, emu_path: str,
+                  work: Path) -> tuple[str | None, int, dict[str, int], dict[str, int]]:
+    """Generate, run and compare program n: (failure message or None,
+    instructions compared, instruction classes, exception events)."""
+    seed = seed_base * 100_000 + n
+    src = work / f"p{n}.s"
+    elf = work / f"p{n}.elf"
+    lockup = n % 20 == 7
+    events_seen: dict[str, int] = {}
+    dump = f"p{n}.mem"
+    (work / "emu").mkdir(exist_ok=True)
+    src.write_text(program(random.Random(seed), length, lockup, dump))
+    subprocess.run(["arm-none-eabi-as", "-o", str(work / f"p{n}.o"), str(src)], check=True)
+    subprocess.run(["arm-none-eabi-ld", "-T", str(work / "link.ld"), "--no-warn-rwx-segments",
+                    "-o", str(elf), str(work / f"p{n}.o")], check=True)
+    log = work / f"p{n}.qemu.log"
+    qemu = subprocess.run(["timeout", "60", "qemu-system-arm", "-machine", "mps2-an386", "-cpu",
+                           "cortex-m4", "-nographic", "-monitor", "none", "-serial", "null",
+                           "-semihosting-config", "enable=on,target=native",
+                           "-accel", "tcg,one-insn-per-tb=on", "-d", "cpu,exec,nochain",
+                           "-D", str(log), "-kernel", str(elf)], capture_output=True, cwd=work)
+    fail = f"FAIL program {n} (seed {seed})"
+    if qemu.returncode != 0 and not lockup:
+        return f"{fail}: QEMU exited with {qemu.returncode}", 0, {}, {}
+    # A bounded run: a broken emulator that loops must fail, not hang.
+    emu = subprocess.run([str(Path(emu_path).resolve()), str(elf), str(20 * length + 100_000)],
+                         capture_output=True, text=True, cwd=work / "emu")
+    # QEMU stops at a lockup with "qemu: fatal: Lockup"; the emulator must
+    # stop there too, with Stop::Lockup.
+    text = log.read_text()
+    locked = lockup and "Lockup" in text[-4000:] and "Lockup" in emu.stderr
+    if lockup and not locked:
+        return (f"{fail}: expected a lockup in QEMU and the emulator: "
+                f"{emu.stderr.strip()[-200:]}"), 0, {}, {}
+    if locked:
+        events_seen["lockup"] = 1
+    want = parse(text)
+    got = parse(emu.stdout)
+    symbols = {line.split()[2]: int(line.split()[0], 16) for line in
+               subprocess.run(["arm-none-eabi-nm", str(elf)], capture_output=True, text=True)
+               .stdout.splitlines() if len(line.split()) == 3}
+    body = symbols["body_start"]
+    # States are compared up to the memory dump (whose file handles may
+    # differ); the dumps are compared instead.
+    end = next((i for i, st in enumerate(want) if st[15] == symbols["epilogue"]), None)
+    if end is not None:
+        want = want[:end + 1]
+        got = got[:end + 1] if len(got) > end else got
+    started = False
+    for i, (w, g) in enumerate(zip(want, got)):
+        # Before the program sets the flags, QEMU's reset values (UNKNOWN
+        # in the architecture) are not compared.
+        started = started or w[15] == body
+        if (w if started else w[:16]) != (g if started else g[:16]):
+            diffs = [f"{nm}: qemu {a:08x} emu {b:08x}" for nm, a, b in zip(names(), w, g) if a != b]
+            pc_prev = want[i - 1][15] if i else 0
+            message = (f"{fail} at step {i}, after the instruction at {pc_prev:#x}: "
+                       + "; ".join(diffs))
+            dis = subprocess.run(["arm-none-eabi-objdump", "-d", str(elf)], capture_output=True,
+                                 text=True).stdout
+            for line in dis.splitlines():
+                if line.strip().startswith(f"{pc_prev:x}:"):
+                    message += f"\n     {line.strip()}"
+            return message, 0, {}, {}
+    if emu.returncode != 0 and not locked:
+        return f"{fail}: emulator: {emu.stderr.strip()[-300:]}", 0, {}, {}
+    if len(want) != len(got):
+        return f"{fail}: {len(want)} QEMU states vs {len(got)} emulator states", 0, {}, {}
+    if not locked:
+        qemu_mem = (work / dump).read_bytes() if (work / dump).exists() else b""
+        emu_mem = (work / "emu" / dump).read_bytes() if (work / "emu" / dump).exists() else b""
+        expected = sum(size for _, size in DUMP_REGIONS)
+        if len(qemu_mem) != expected or qemu_mem != emu_mem:
+            offset = next((i for i, (a, b) in enumerate(zip(qemu_mem, emu_mem)) if a != b),
+                          min(len(qemu_mem), len(emu_mem)))
+            address = offset
+            for base, size in DUMP_REGIONS:
+                if address < size:
+                    address += base
+                    break
+                address -= size
+            return (f"{fail}: memory differs at {address:#010x} ({len(qemu_mem)} bytes from QEMU, "
+                    f"{len(emu_mem)} from the emulator)"), 0, {}, {}
+        events_seen["memory dumps identical"] = 1
+        (work / dump).unlink()
+        (work / "emu" / dump).unlink()
+    classes = mnemonic_classes(elf, [st[15] for st in want])
+    for k, v in events(emu.stderr).items():
+        events_seen[k] = events_seen.get(k, 0) + v
+    log.unlink()
+    return None, len(want), classes, events_seen
 
 
 def main() -> int:
@@ -764,59 +1167,44 @@ def main() -> int:
     ap.add_argument("--programs", type=int, default=20)
     ap.add_argument("--length", type=int, default=1500)
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--jobs", type=int, default=1, help="programs checked in parallel")
+    ap.add_argument("--min-instructions", type=int, default=0,
+                    help="fail unless at least this many instructions were compared")
     ap.add_argument("--keep")
     args = ap.parse_args()
 
     total = 0
     coverage: dict[str, int] = {}
+    event_counts: dict[str, int] = {}
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(args.keep or tmp)
         work.mkdir(parents=True, exist_ok=True)
         (work / "link.ld").write_text(LINKER)
-        for n in range(args.programs):
-            seed = args.seed * 100_000 + n
-            src = work / f"p{n}.s"
-            elf = work / f"p{n}.elf"
-            src.write_text(program(random.Random(seed), args.length))
-            subprocess.run(["arm-none-eabi-as", "-o", str(work / f"p{n}.o"), str(src)], check=True)
-            subprocess.run(["arm-none-eabi-ld", "-T", str(work / "link.ld"), "--no-warn-rwx-segments",
-                            "-o", str(elf), str(work / f"p{n}.o")], check=True)
-            log = work / f"p{n}.qemu.log"
-            subprocess.run(["timeout", "60", "qemu-system-arm", "-machine", "mps2-an386", "-cpu",
-                            "cortex-m4", "-nographic", "-monitor", "none", "-serial", "null",
-                            "-semihosting-config", "enable=on,target=native",
-                            "-accel", "tcg,one-insn-per-tb=on", "-d", "cpu,nochain",
-                            "-D", str(log), "-kernel", str(elf)], check=True)
-            emu = subprocess.run([args.emu, str(elf)], capture_output=True, text=True)
-            if emu.returncode != 0:
-                print(f"FAIL program {n} (seed {seed}): emulator: {emu.stderr.strip()}")
-            want = parse(log.read_text())
-            got = parse(emu.stdout)
-            body = int(subprocess.run(["arm-none-eabi-nm", str(elf)], capture_output=True, text=True)
-                       .stdout.split(" T body_start")[0].split()[-1], 16)
-            started = False
-            for i, (w, g) in enumerate(zip(want, got)):
-                # Before the program sets the flags, QEMU's reset values
-                # (UNKNOWN in the architecture) are not compared.
-                started = started or w[15] == body
-                if (w if started else w[:16]) != (g if started else g[:16]):
-                    diffs = [f"{nm}: qemu {a:08x} emu {b:08x}" for nm, a, b in zip(names(), w, g) if a != b]
-                    pc_prev = want[i - 1][15] if i else 0
-                    print(f"FAIL program {n} (seed {seed}) at step {i}, after the instruction at "
-                          f"{pc_prev:#x}: " + "; ".join(diffs))
-                    dis = subprocess.run(["arm-none-eabi-objdump", "-d", str(elf)], capture_output=True,
-                                         text=True).stdout
-                    for line in dis.splitlines():
-                        if line.strip().startswith(f"{pc_prev:x}:"):
-                            print(f"     {line.strip()}")
-                    return 1
-            if len(want) != len(got) or emu.returncode != 0:
-                print(f"FAIL program {n} (seed {seed}): {len(want)} QEMU states vs {len(got)} emulator states")
+        jobs = [(n, args.seed, args.length, args.emu, work) for n in range(args.programs)]
+        if args.jobs > 1:
+            with ProcessPoolExecutor(max_workers=args.jobs) as pool:
+                results = list(pool.map(check_program, *zip(*jobs)))
+        else:
+            results = []
+            for job in jobs:
+                results.append(check_program(*job))
+                if results[-1][0]:
+                    break
+        for failure, count, classes, seen in results:
+            if failure:
+                print(failure)
                 return 1
-            total += len(want)
-            for k, v in mnemonic_classes(elf, [st[15] for st in want]).items():
+            total += count
+            for k, v in classes.items():
                 coverage[k] = coverage.get(k, 0) + v
-            log.unlink()
+            for k, v in seen.items():
+                event_counts[k] = event_counts.get(k, 0) + v
+    print("exceptions: " + ", ".join(f"{k}={event_counts[k]}" for k in sorted(event_counts)))
+    required_events = REQUIRED_EVENTS if args.programs > 7 else REQUIRED_EVENTS - {"lockup"}
+    missing_events = sorted(e for e in required_events if event_counts.get(e, 0) == 0)
+    if missing_events:
+        print(f"emu-difftest: FAIL (exception events never happened: {', '.join(missing_events)})")
+        return 1
     missing = sorted(REQUIRED - set(coverage))
     print("executed: " + ", ".join(f"{k}={coverage[k]}" for k in sorted(coverage)))
     unexpected = sorted(set(coverage) - REQUIRED)
@@ -825,10 +1213,17 @@ def main() -> int:
         return 1
     if missing:
         print(f"emu-difftest: FAIL (instruction classes never executed: {', '.join(missing)})")
-        print(f"(least executed: {', '.join(f'{k}={v}' for k, v in sorted(coverage.items(), key=lambda kv: kv[1])[:10])})")
+        least = sorted(coverage.items(), key=lambda kv: kv[1])[:10]
+        print(f"(least executed: {', '.join(f'{k}={v}' for k, v in least)})")
+        return 1
+    if total < args.min_instructions:
+        print(f"emu-difftest: FAIL (only {total} instructions compared, "
+              f"{args.min_instructions} required)")
         return 1
     print(f"emu-difftest: PASS ({args.programs} programs, {total} instructions identical to QEMU, "
-          f"all {len(REQUIRED)} instruction classes executed)")
+          f"all {len(REQUIRED)} instruction classes executed, "
+          f"{sum(v for k, v in event_counts.items() if k.startswith('entry'))} exceptions taken, "
+          f"all {len(required_events)} kinds of exception event)")
     return 0
 
 
