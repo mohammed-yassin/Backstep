@@ -1,6 +1,6 @@
 # ADR 0008: The recording file and how replay checks it
 
-**Status:** Accepted (M3, part 1)
+**Status:** Accepted (M3)
 
 ## Context
 
@@ -120,8 +120,11 @@ Writing the tests found four problems, all fixed:
 
 ## Consequences
 
-- The hardware criterion of M3 is the same check on the NUCLEO-F411RE:
-  the recording goes out over the UART, and the replay's end registers
-  and RAM CRC must equal the recorded ones (M3, part 2).
+- The hardware criterion of M3 is the same check on the NUCLEO-F411RE
+  (`record_hw.c`, `scripts/hil/m3_nucleo_f411re.py`). The recording goes
+  out over the UART as hex with its own CRC-32, and the replay's end
+  registers and RAM CRC must equal the recorded ones. In CI the image runs
+  on QEMU's netduinoplus2, and the replay must also equal QEMU's trace
+  instruction for instruction (`scripts/qemu-nucleo-replay-smoke.py`).
 - M4 adds the interrupt log and replays interrupts with
   `Cpu::set_pending` at the recorded positions.
