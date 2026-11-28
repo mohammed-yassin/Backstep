@@ -17,7 +17,7 @@ Status legend: **Done** (merged, automated criteria met) ·
 | M2 | Cortex-M4 emulator | Done (hardware measurement pending) |
 | M3 | First recording and replay (no interrupts) | Done (hardware check pending) |
 | M4 | Interrupts and faults | Done (hardware check pending) |
-| M5 | GDB with step-back, v0.1 release | Planned |
+| M5 | GDB with step-back, v0.1 release | In progress |
 | M6 | "Who wrote this?" queries | Planned |
 | M7 | Real-world STM32 firmware (FPU, DMA, HAL) | Planned |
 | M8 | FreeRTOS | Planned |
@@ -134,8 +134,8 @@ verified against QEMU; see [ADR 0006](adr/0006-emulator.md) and
   chunk), and replay delivers every interrupt at its recorded position
   ([ADR 0009](adr/0009-replaying-interrupts.md)). The recorder no longer
   leaves traces in the program's stack that replay cannot reproduce.
-  `scripts/replay-irq-test.py` replays 100 of 100 QEMU runs exactly (41,616
-  interrupts, 1,814 nested), plus
+  `scripts/replay-irq-test.py` replays 100 of 100 QEMU runs exactly (about
+  42,000 interrupts, 1,800 nested), plus
   10 crash recordings ended by a HardFault, and compares QEMU's trace
   with the replay's state for state, handlers included.
 - Part 2 brings it to the NUCLEO-F411RE (`record_irq_hw.c`): 20 runs with
@@ -151,6 +151,14 @@ verified against QEMU; see [ADR 0006](adr/0006-emulator.md) and
 - *Hardware:* 20 of 20 runs replay exactly on NUCLEO-F411RE.
 
 ## M5: GDB with step-back, v0.1 release
+
+**Status: in progress.**
+
+- Part 1: replay lookahead for ambiguous interrupt keys, and interrupts
+  that preempted another before its stub ran
+  ([ADR 0009](adr/0009-replaying-interrupts.md)); copy-on-write emulator
+  memory and watched accesses, the base for checkpoints.
+- Next: checkpoints and reverse execution, then the GDB server.
 
 **Acceptance criteria**
 - GDB server supports continue, step, breakpoints, watchpoints,

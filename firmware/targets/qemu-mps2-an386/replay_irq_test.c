@@ -15,7 +15,9 @@
  * random rates and how many interrupts to record (default 400);
  * "c=<seed>[:n=<interrupts>]" makes the timer 1 handler corrupt a function
  * pointer after 3/8 of them, so the main code faults: the HardFault ends
- * the recording (a crash dump).
+ * the recording (a crash dump). "a=<seed>[:n=<interrupts>]" adds a wait
+ * loop whose iterations the interrupt key cannot tell apart (ADR 0004):
+ * replay must find the right one (ADR 0009, lookahead).
  * The recording goes to "recording.bsr".
  *
  * SPDX-License-Identifier: MIT
@@ -55,6 +57,10 @@ static volatile uint32_t g_flags[3];
 static volatile uint32_t g_shared[16];
 static uint32_t g_buf[64];
 static uint32_t g_crash;
+static uint32_t g_ambiguous;
+/* Used by name from the wait loop's assembly. */
+volatile uint32_t g_spin_count __attribute__((used));
+volatile uint32_t g_spin_stop __attribute__((used));
 static uint32_t g_target = DEFAULT_INTERRUPTS;
 static void (*volatile g_callback)(void);
 
@@ -106,6 +112,7 @@ void systick_isr(void)
     REG32(SYST_CVR) = 0u;
     g_shared[r & 15u] += REG32(TIMER2 + T_VALUE);
     g_flags[0]++;
+    g_spin_stop = 1u;
     g_interrupts++;
 }
 
@@ -116,6 +123,7 @@ void timer0_isr(void)
     REG32(TIMER0 + T_RELOAD) = 120u + (r % 360u);
     g_shared[(r >> 4) & 15u] ^= REG32(TIMER0 + T_VALUE) + bs_crc32((const void *)g_shared, 16u);
     g_flags[1]++;
+    g_spin_stop = 1u;
     g_interrupts++;
 }
 
@@ -129,6 +137,7 @@ void timer1_isr(void)
     }
     g_shared[r & 15u] = acc ^ REG32(TIMER1 + T_VALUE);
     g_flags[2]++;
+    g_spin_stop = 1u;
     g_interrupts++;
     if (g_crash != 0u && g_interrupts > g_target * 3u / 8u) {
         g_callback = (void (*)(void))0x00001000u; /* not code: the main code faults */
@@ -175,6 +184,31 @@ static void wait_flag(unsigned which)
     fold(n);
 }
 
+/*
+ * Spin until an interrupt: every iteration has the same registers, flags
+ * and stack at four of its eight instructions; only g_spin_count, in
+ * static RAM (not in the key), tells them apart. Afterwards one timer
+ * read per iteration: an interrupt replayed in the wrong iteration
+ * changes the number of peripheral loads, which replay notices at once.
+ */
+static void ambiguous_wait(void)
+{
+    uint32_t n;
+    g_spin_count = 0u;
+    g_spin_stop = 0u;
+    __asm__ volatile("1: ldr r0, =g_spin_count\n\t"
+                     "ldr r1, [r0]\n\t"
+                     "adds r1, r1, #1\n\t"
+                     "str r1, [r0]\n\t"
+                     "ldr r0, =g_spin_stop\n\t"
+                     "ldr r1, [r0]\n\t"
+                     "cmp r1, #0\n\t"
+                     "beq 1b\n\t" ::: "r0", "r1", "cc", "memory");
+    for (n = g_spin_count; n != 0u; --n) {
+        fold(REG32(TIMER2 + T_VALUE));
+    }
+}
+
 static void round_of_work(uint32_t round)
 {
     uint32_t i, j;
@@ -194,6 +228,9 @@ static void round_of_work(uint32_t round)
         fold(REG32(TIMER2 + T_VALUE)); /* polling from the main code */
     }
     wait_flag(round % 3u);
+    if (g_ambiguous != 0u) {
+        ambiguous_wait();
+    }
     g_callback();
 }
 
@@ -248,8 +285,8 @@ int main(void)
 
     test_uart_init();
     if (semihost_get_cmdline(cmdline, sizeof cmdline) == 0) {
-        /* "s=<seed>" or "c=<seed>", then optionally ":n=<interrupts>" */
-        if ((cmdline[0] == 's' || cmdline[0] == 'c') && cmdline[1] == '=') {
+        /* "s=", "c=" or "a=<seed>", then optionally ":n=<interrupts>" */
+        if ((cmdline[0] == 's' || cmdline[0] == 'c' || cmdline[0] == 'a') && cmdline[1] == '=') {
             uint32_t seed = 0;
             for (i = 2; cmdline[i] >= '0' && cmdline[i] <= '9'; ++i) {
                 seed = seed * 10u + (uint32_t)(cmdline[i] - '0');
@@ -258,6 +295,7 @@ int main(void)
                 g_crash = 1u;
                 g_rng = (seed + 7u) * 0x85EBCA6Bu;
             } else {
+                g_ambiguous = cmdline[0] == 'a';
                 g_rng = (seed + 1u) * 0x9E3779B1u;
             }
             if (cmdline[i] == ':' && cmdline[i + 1] == 'n' && cmdline[i + 2] == '=') {

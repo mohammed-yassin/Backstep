@@ -132,6 +132,13 @@ fn replay(
                 report.interrupts,
                 report.stores
             );
+            if report.retries > 0 {
+                println!(
+                    "replay: {} interrupt placements retried: their key also matched at other \
+                     positions, and the first led to a divergence",
+                    report.retries
+                );
+            }
             println!(
                 "replay: end state matches the recording (registers, RAM CRC-32 {:08X})",
                 report.ram_crc32

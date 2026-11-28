@@ -68,9 +68,8 @@ explicitly and documented in the script.
 
 ## Consequences
 
-- The replay engine must support **lookahead on ambiguous keys** (M4
-  replays the first match and detects a wrong one; rewinding comes with
-  the checkpoints of M5, see ADR 0009).
+- The replay engine must support **lookahead on ambiguous keys**: done
+  in M5, see ADR 0009.
   When a key matches, it records a checkpoint and continues. If the next
   recorded data disagrees (next interrupt key never reached, a peripheral
   read at a different address, or a state checksum mismatch), it rewinds

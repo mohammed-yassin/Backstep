@@ -148,6 +148,39 @@ fn replay_can_raise_interrupts_and_priorities_decide() {
 }
 
 #[test]
+fn interrupt_now_enters_at_once_or_leaves_pending_as_it_was() {
+    let mut cpu = cpu_with(&[0xBF00, 0xBF00, 0xBF00]); // nops
+    cpu.scs.enabled[IRQ0 + 3] = true;
+    cpu.scs.priority[IRQ0 + 3] = 0x80;
+    step(&mut cpu);
+    assert_eq!(cpu.interrupt_now(&mut NoBus, IRQ0 + 3), Ok(true));
+    assert_eq!(
+        cpu.ipsr as usize,
+        IRQ0 + 3,
+        "entered before the next instruction"
+    );
+    assert_eq!(stacked(&cpu, 6), CODE + 2);
+    assert!(!cpu.scs.pending[IRQ0 + 3]);
+    // Inside it, the same priority cannot preempt: nothing changes.
+    let r = cpu.r;
+    assert_eq!(cpu.interrupt_now(&mut NoBus, IRQ0 + 3), Ok(false));
+    assert!(!cpu.scs.pending[IRQ0 + 3]);
+    assert_eq!(cpu.r, r);
+    // An interrupt that was already pending stays pending.
+    cpu.scs.enabled[IRQ0 + 6] = true;
+    cpu.scs.priority[IRQ0 + 6] = 0xC0;
+    cpu.set_pending(IRQ0 + 6);
+    assert_eq!(cpu.interrupt_now(&mut NoBus, IRQ0 + 6), Ok(false));
+    assert!(cpu.scs.pending[IRQ0 + 6]);
+    // PRIMASK masks it too.
+    step(&mut cpu); // bx lr: IRQ6 tail-chains
+    step(&mut cpu); // and returns
+    cpu.primask = true;
+    assert_eq!(cpu.interrupt_now(&mut NoBus, IRQ0 + 3), Ok(false));
+    assert_eq!(cpu.ipsr, 0);
+}
+
+#[test]
 fn exception_entry_clears_the_exclusive_monitor() {
     let mut cpu = cpu_with(&[0xBF00]);
     cpu.monitor = Some(RAM);
