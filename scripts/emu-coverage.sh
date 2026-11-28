@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Line coverage of the emulator's decoder and exception model, from the
-# unit tests plus a differential run against QEMU, with an instrumented
-# build (-C instrument-coverage). M2 requires at least 90%.
+# Line coverage of the emulator's decoder, exception model and floating-
+# point unit, from the unit tests plus differential runs against QEMU
+# (integer and floating point), with an instrumented build
+# (-C instrument-coverage). M2 requires at least 90%.
 #
 # Usage: scripts/emu-coverage.sh [--programs N] [--min PERCENT]
 # Needs llvm-profdata and llvm-cov that read rustc's profile format: the
@@ -48,20 +49,23 @@ for l in sys.stdin:
         print(m["executable"])')"
 python3 scripts/emu-difftest.py --emu "$CARGO_TARGET_DIR/release/backstep-emu-trace" \
     --programs "$programs" --seed 3 --jobs "$(nproc)" | tail -1
+python3 scripts/emu-difftest.py --emu "$CARGO_TARGET_DIR/release/backstep-emu-trace" --fpu \
+    --programs "$programs" --seed 3 --jobs "$(nproc)" | tail -1
 
 "$tools/llvm-profdata" merge -sparse -o "$tmp/merged.profdata" "$tmp"/profile-*.profraw
 objects=("$CARGO_TARGET_DIR/release/backstep-emu-trace")
 for t in $tests; do objects+=("-object=$t"); done
 files=(crates/backstep-emu/src/cpu.rs crates/backstep-emu/src/cpu/thumb32.rs
-       crates/backstep-emu/src/cpu/exceptions.rs)
+       crates/backstep-emu/src/cpu/exceptions.rs crates/backstep-emu/src/cpu/vfp.rs
+       crates/backstep-emu/src/fpu.rs)
 report="$(cd host && "$tools/llvm-cov" report -instr-profile="$tmp/merged.profdata" \
     "${objects[@]}" "${files[@]}")"
 echo "$report"
 # Columns: Filename Regions Missed Cover Functions Missed Executed Lines Missed Cover ...
 total="$(awk '$1 == "TOTAL" {print $10}' <<<"$report" | tr -d '%')"
 if awk -v t="$total" -v m="$min" 'BEGIN {exit !(t >= m)}'; then
-    echo "emu-coverage: PASS (decoder and exception model: ${total}% of lines, minimum ${min}%)"
+    echo "emu-coverage: PASS (decoder, exception model and FPU: ${total}% of lines, minimum ${min}%)"
 else
-    echo "emu-coverage: FAIL (decoder and exception model: ${total}% of lines, minimum ${min}%)"
+    echo "emu-coverage: FAIL (decoder, exception model and FPU: ${total}% of lines, minimum ${min}%)"
     exit 1
 fi

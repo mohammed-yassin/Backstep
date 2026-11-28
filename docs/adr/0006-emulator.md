@@ -1,6 +1,6 @@
 # ADR 0006: The replay emulator and how it is verified
 
-**Status:** Accepted (M2, parts 1 and 2; exceptions in [ADR 0007](0007-exceptions.md))
+**Status:** Accepted (M2, parts 1 and 2; exceptions in [ADR 0007](0007-exceptions.md); floating point, added in M7, in [ADR 0012](0012-floating-point.md))
 
 ## Context
 

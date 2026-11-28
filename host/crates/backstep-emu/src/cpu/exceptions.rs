@@ -13,7 +13,7 @@
 //! registers go to the [`Bus`], which during replay answers from the
 //! recording.
 
-use super::{Cpu, Exec, Stop};
+use super::{vfp, Cpu, Exec, Stop};
 use crate::alu::Flags;
 use crate::memory::{Bus, Fault};
 
@@ -50,6 +50,8 @@ pub mod cfsr {
     pub const UNDEFINSTR: u32 = 1 << 16;
     /// Execution with EPSR.T = 0.
     pub const INVSTATE: u32 = 1 << 17;
+    /// Coprocessor instruction with the coprocessor absent or disabled.
+    pub const NOCP: u32 = 1 << 19;
     /// Unaligned access.
     pub const UNALIGNED: u32 = 1 << 24;
     /// Division by zero (with CCR.DIV_0_TRP).
@@ -108,6 +110,14 @@ pub struct Scs {
     pub mmfar: u32,
     /// BFAR.
     pub bfar: u32,
+    /// CPACR (only the cp10 and cp11 fields).
+    pub cpacr: u32,
+    /// FPCCR (reset: ASPEN and LSPEN set).
+    pub fpccr: u32,
+    /// FPCAR: where lazy state preservation writes S0-S15 and FPSCR.
+    pub fpcar: u32,
+    /// FPDSCR: the FPSCR controls of a new floating-point context.
+    pub fpdscr: u32,
 }
 
 impl Scs {
@@ -130,6 +140,10 @@ impl Scs {
             hfsr: 0,
             mmfar: 0,
             bfar: 0,
+            cpacr: 0,
+            fpccr: vfp::fpccr::RESET,
+            fpcar: 0,
+            fpdscr: 0,
         }
     }
 
@@ -156,13 +170,14 @@ pub struct ExceptionStats {
     /// Returns to handler mode, thread mode on MSP, thread mode on PSP.
     pub returns: [u64; 3],
     /// Faults by cause, in the order of [`FAULT_CAUSES`].
-    pub faults: [u64; 6],
+    pub faults: [u64; 7],
 }
 
 /// Fault causes counted in [`ExceptionStats::faults`], with their CFSR bit.
-pub const FAULT_CAUSES: [(&str, u32); 6] = [
+pub const FAULT_CAUSES: [(&str, u32); 7] = [
     ("undefinstr", cfsr::UNDEFINSTR),
     ("invstate", cfsr::INVSTATE),
+    ("nocp", cfsr::NOCP),
     ("unaligned", cfsr::UNALIGNED),
     ("divbyzero", cfsr::DIVBYZERO),
     ("ibuserr", cfsr::IBUSERR),
@@ -496,7 +511,9 @@ impl Cpu {
             | 0xE000_ED34..=0xE000_ED3B
             | 0xE000_E100..=0xE000_E33F
             | 0xE000_E400..=0xE000_E5EF
-            | 0xE000_EF00..=0xE000_EF03)
+            | 0xE000_ED88..=0xE000_ED8B
+            | 0xE000_EF00..=0xE000_EF03
+            | 0xE000_EF34..=0xE000_EF4B)
     }
 
     fn scs_fault(pc: u32, address: u32, size: u8, write: bool) -> Stop {
@@ -608,6 +625,12 @@ impl Cpu {
             0xE000_ED2C => self.scs.hfsr,
             0xE000_ED34 => self.scs.mmfar,
             0xE000_ED38 => self.scs.bfar,
+            0xE000_ED88 => self.scs.cpacr,
+            0xE000_EF34 => self.scs.fpccr,
+            0xE000_EF38 => self.scs.fpcar,
+            0xE000_EF3C => self.scs.fpdscr,
+            0xE000_EF40 => vfp::MVFR0,
+            0xE000_EF44 => vfp::MVFR1,
             0xE000_E100..=0xE000_E1FF => self.irq_bits((word >> 2) & 0x1F, &self.scs.enabled),
             0xE000_E200..=0xE000_E2FF => self.irq_bits((word >> 2) & 0x1F, &self.scs.pending),
             0xE000_E300..=0xE000_E33F => self.irq_bits((word >> 2) & 0xF, &self.scs.active),
@@ -702,6 +725,10 @@ impl Cpu {
             0xE000_ED2C => self.scs.hfsr &= !(v & 0xC000_0002),
             0xE000_ED34 => self.scs.mmfar = v,
             0xE000_ED38 => self.scs.bfar = v,
+            0xE000_ED88 => self.scs.cpacr = v & vfp::CPACR_WRITABLE,
+            0xE000_EF34 => self.scs.fpccr = v & vfp::fpccr::WRITABLE,
+            0xE000_EF38 => self.scs.fpcar = v & !7,
+            0xE000_EF3C => self.scs.fpdscr = v & vfp::FPDSCR_WRITABLE,
             0xE000_E100..=0xE000_E17F => {
                 self.update_irq_bits((address >> 2) & 0x1F, v, true, false);
             }
@@ -718,7 +745,7 @@ impl Cpu {
                     self.scs.pending[n] = true;
                 }
             }
-            _ => {} // IABR is read-only
+            _ => {} // IABR, MVFR0-2 are read-only
         }
         Ok(())
     }

@@ -16,6 +16,7 @@
 
 pub mod debug;
 
+use backstep_emu::cpu::exceptions::FAULT_CAUSES;
 use backstep_emu::memory::WatchKind;
 use backstep_emu::Cpu;
 use backstep_replay::{ReplayError, Stop, Timeline, Watchpoint};
@@ -323,7 +324,7 @@ pub fn events(t: &mut Timeline<'_>, debug: &DebugInfo<'_>) -> Result<Vec<Event>,
         previous: None,
     }];
     let mut previous_pc = None;
-    let counts = |cpu: &Cpu| -> (u64, u64, u64, u64, [u64; 6]) {
+    let counts = |cpu: &Cpu| -> (u64, u64, u64, u64, [u64; FAULT_CAUSES.len()]) {
         let s = &cpu.stats;
         (
             s.entries.iter().sum(),
@@ -360,7 +361,7 @@ pub fn events(t: &mut Timeline<'_>, debug: &DebugInfo<'_>) -> Result<Vec<Event>,
         }
         if now.0 > before.0 {
             let n = cpu.ipsr;
-            let causes: Vec<String> = backstep_emu::cpu::exceptions::FAULT_CAUSES
+            let causes: Vec<String> = FAULT_CAUSES
                 .iter()
                 .zip(now.4.iter().zip(before.4.iter()))
                 .filter(|(_, (a, b))| a > b)

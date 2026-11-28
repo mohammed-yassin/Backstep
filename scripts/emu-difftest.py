@@ -22,8 +22,16 @@ MSR/MRS and running on PSP; 32-bit instructions also appear inside IT
 blocks. Coverage is counted per class and per encoding width; the run
 fails if a required class never executed or an unknown one did.
 
-Usage: emu-difftest.py --emu <backstep-emu-trace> [--programs N] [--length L]
-                       [--seed S] [--jobs J] [--min-instructions M] [--keep DIR]
+With --fpu (GenFP) most instructions are floating point (FPv4-SP): all
+arithmetic, conversions, compares, register transfers, loads and stores,
+FPSCR access, in IT blocks too, and NOCP, UNDEFINED and alignment faults,
+on operands biased to edge values. QEMU logs with -d cpu,fpu and S0-S31
+and FPSCR are compared too; every floating-point class, exception flag,
+rounding mode and FZ/DN/AHP must occur.
+
+Usage: emu-difftest.py --emu <backstep-emu-trace> [--fpu] [--programs N] [--length L]
+                       [--seed S] [--jobs J] [--min-instructions M]
+                       [--min-fp-instructions F] [--keep DIR]
 
 SPDX-License-Identifier: MIT
 """
@@ -34,6 +42,7 @@ import argparse
 import os
 import random
 import re
+import struct
 import subprocess
 import sys
 import tempfile
@@ -793,6 +802,287 @@ class Gen3(Gen32):
         return out + ["    .ltorg"]
 
 
+CPACR, FPCCR, FPCAR, FPDSCR = 0xE000ED88, 0xE000EF34, 0xE000EF38, 0xE000EF3C
+FPU_SCS = {"CPACR": CPACR, "FPCCR": FPCCR, "FPCAR": FPCAR, "FPDSCR": FPDSCR,
+           "MVFR0": 0xE000EF40, "MVFR1": 0xE000EF44, "MVFR2": 0xE000EF48}
+FP3 = ["vadd", "vsub", "vmul", "vnmul", "vdiv", "vmla", "vmls", "vnmla", "vnmls", "vfma", "vfms",
+       "vfnma", "vfnms"]
+FP_FIXED = [("s16", 16), ("u16", 16), ("s32", 32), ("u32", 32)]
+FP_WORDS = 256          # buffer words 64-319 hold floating-point test values
+
+
+def vfp_imm(imm8: int) -> float:
+    """The value of VMOV.F32 #imm8 (VFPExpandImm)."""
+    sign = -1.0 if imm8 & 0x80 else 1.0
+    # Exponent field NOT(b6):b6:b6:b6:b6:b6:b5:b4, so 2^-3 .. 2^4.
+    b6, b54 = (imm8 >> 6) & 1, (imm8 >> 4) & 3
+    e = ((b6 ^ 1) << 7 | (0x1F if b6 else 0) << 2 | b54) - 127
+    return sign * (16 + (imm8 & 0xF)) / 16 * 2.0 ** e
+
+
+class GenFP(Gen3):
+    """Floating-point instructions (FPv4-SP): all arithmetic, conversions
+    (integer, fixed point, half precision), compares, register transfers,
+    loads and stores of single and double registers, FPSCR access with
+    every rounding mode and FZ/DN/AHP, in IT blocks too; and the faults
+    (NOCP with CPACR denying access or another coprocessor, UNDEFINED
+    double precision, UNALIGNED, BusFault). FPCCR.ASPEN is cleared, so the
+    exception frames stay basic (extended frames are the next step)."""
+
+    def sreg(self) -> str:
+        return f"s{self.r.randrange(32)}"
+
+    def dreg(self) -> str:
+        return f"d{self.r.randrange(16)}"
+
+    def fp_value(self) -> int:
+        """A float32 bit pattern, biased towards special and edge values."""
+        r = self.r
+        sign = r.getrandbits(1) << 31
+        kind = r.randrange(16)
+        if kind == 0:
+            return sign | r.choice([0, 0x7F800000])                      # zero, infinity
+        if kind == 1:
+            return sign | 0x7FC00000 | r.getrandbits(22) * r.getrandbits(1)  # quiet NaN
+        if kind == 2:
+            return sign | 0x7F800000 | max(1, r.getrandbits(22))         # signalling NaN
+        if kind == 3:
+            return sign | r.choice([1, 0x7FFFFF, max(1, r.getrandbits(23))])  # denormal
+        if kind == 4:
+            return sign | r.choice([0x00800000, 0x7F7FFFFF, 0x00800001, 0x7F7FFFFE])
+        if kind == 5:                                                    # near 1, 2, 0.5
+            return sign | (r.choice([0x3F800000, 0x40000000, 0x3F000000]) + r.randrange(-4, 5))
+        if kind == 6:                                                    # small integers
+            return struct.unpack("<I", struct.pack("<f", float(r.randrange(-100, 101))))[0]
+        if kind == 7:                                                    # integer limits
+            base = r.choice([0x4F000000, 0x4F800000, 0x47000000, 0x47800000, 0x46FFFE00])
+            return sign | (base + r.randrange(-2, 3))
+        if kind == 8:                                                    # half-precision edges
+            return sign | r.choice([0x477FE000, 0x477FF000, 0x477FEFFF, 0x38800000, 0x33800000,
+                                    0x33000000, 0x387FC000, 0x47800000, 0x477FFFFF])
+        if kind == 9:                                                    # tiny normals: underflow
+            return sign | (r.randrange(1, 0x30) << 23) | r.getrandbits(23)
+        if kind == 10:                                                   # huge: overflow
+            return sign | (r.randrange(0xD0, 0xFF) << 23) | r.getrandbits(23)
+        if kind == 11:                                                   # integers to convert
+            return r.choice([0x80000000, 0x7FFFFFFF, 0xFFFFFFFF, 1, r.getrandbits(16),
+                             r.getrandbits(24), 0x01000001])
+        return r.getrandbits(32)
+
+    def fpscr_value(self) -> int:
+        """FPSCR: random NZCV, rounding mode, FZ, DN, AHP; mostly no flags
+        (they are cumulative, so clearing them keeps each new one visible);
+        sometimes unimplemented bits (ignored)."""
+        r = self.r
+        v = r.getrandbits(4) << 28 | r.randrange(4) << 22
+        v |= (1 << 24) * (r.random() < 0.3) | (1 << 25) * (r.random() < 0.3) | (1 << 26) * (r.random() < 0.3)
+        if r.random() < 0.15:
+            v |= r.getrandbits(32) & ~0xF7C0009F
+        if r.random() < 0.2:
+            v |= r.getrandbits(5) | r.getrandbits(1) << 7
+        return v
+
+    def setup(self) -> list[str]:
+        out = super().setup()
+        r = self.r
+        # Full or privileged-only access (the code is privileged). Values
+        # with cp10 and cp11 different, or the reserved 0b10, are
+        # UNPREDICTABLE, so they are not tested.
+        out += self.fp_store("CPACR", r.choice([0x00F00000, 0x00F00000, 0x00500000]))
+        # LSPEN alone does nothing without ASPEN.
+        out += self.fp_store("FPCCR", r.choice([0, 1 << 30]))
+        out += self.fp_store("FPDSCR", r.getrandbits(32))
+        out += self.fp_store("FPCAR", r.getrandbits(32))
+        return out + ["dsb", "isb"]
+
+    def fp_store(self, reg: str, value: int) -> list[str]:
+        return [f"ldr.w r5, =0x{FPU_SCS[reg]:08x}", f"ldr.w r4, =0x{value:08x}", "str.w r4, [r5]"]
+
+    def fp_init(self) -> list[str]:
+        """S0-S31 from the floating-point test values, and FPSCR."""
+        return ["add.w r5, r7, #256", "vldmia r5, {s0-s31}", f"ldr.w r4, =0x{self.fpscr_value():08x}",
+                "vmsr fpscr, r4"]
+
+    def scs_read(self, dest: str) -> list[str]:
+        if self.r.random() < 0.3:
+            reg = self.r.choice(list(FPU_SCS))
+            return [f"ldr.w r5, =0x{FPU_SCS[reg]:08x}", f"ldr.w {dest}, [r5]"]
+        return super().scs_read(dest)
+
+    def fp_insn(self, cond: str | None) -> str:
+        """One floating-point instruction (conditional inside IT)."""
+        r = self.r
+        c = self.c
+        kind = r.randrange(20)
+        sd, sn, sm = self.sreg(), self.sreg(), self.sreg()
+        if kind < 5:
+            return f"{c(r.choice(FP3), cond)}.f32 {sd}, {sn}, {sm}"
+        if kind == 5:
+            return f"{c(r.choice(['vabs', 'vneg', 'vsqrt', 'vmov', 'vsqrt']), cond)}.f32 {sd}, {sm}"
+        if kind == 6:
+            return f"{c('vmov', cond)}.f32 {sd}, #{vfp_imm(r.randrange(256))!r}"
+        if kind == 7:
+            other = "#0" if r.random() < 0.3 else sm
+            return f"{c(r.choice(['vcmp', 'vcmpe']), cond)}.f32 {sd}, {other}"
+        if kind == 8:
+            op = r.choice(["vcvt.s32.f32", "vcvt.u32.f32", "vcvtr.s32.f32", "vcvtr.u32.f32",
+                           "vcvt.f32.s32", "vcvt.f32.u32"])
+            base, types = op.split(".", 1)
+            return f"{c(base, cond)}.{types} {sd}, {sm}"
+        if kind == 9:
+            t, size = r.choice(FP_FIXED)
+            bits = self.imm(1, size)
+            types = f"{t}.f32" if r.random() < 0.5 else f"f32.{t}"
+            return f"{c('vcvt', cond)}.{types} {sd}, {sd}, #{bits}"
+        if kind == 10:
+            types = r.choice(["f32.f16", "f16.f32"])
+            return f"{c(r.choice(['vcvtb', 'vcvtt']), cond)}.{types} {sd}, {sm}"
+        if kind == 11:
+            if r.random() < 0.5:
+                return f"{c('vmov', cond)} {r.choice(DST)}, {sn}"
+            return f"{c('vmov', cond)} {sn}, {r.choice(SRC)}"
+        if kind == 12:
+            a, b = r.sample(DST, 2)
+            m = r.randrange(31)
+            pair = f"s{m}, s{m + 1}" if r.random() < 0.5 else self.dreg()
+            if r.random() < 0.5:
+                return f"{c('vmov', cond)} {a}, {b}, {pair}"
+            return f"{c('vmov', cond)} {pair}, {r.choice(SRC)}, {r.choice(SRC)}"
+        if kind == 13:
+            reg = sd if r.random() < 0.6 else self.dreg()
+            op = r.choice(["vldr", "vstr"])
+            off = self.imm(-32, 255) * 4
+            return f"{c(op, cond)} {reg}, [r7, #{off}]"
+        if kind == 14:
+            reg = sd if r.random() < 0.6 else self.dreg()
+            return f"{c('vldr', cond)} {reg}, 8f"
+        if kind == 15:
+            if r.random() < 0.5:
+                return f"{c('vmrs', cond)} {r.choice(DST)}, fpscr"
+            return f"{c('vmrs', cond)} APSR_nzcv, fpscr"
+        if kind == 16:
+            return f"{c('vmsr', cond)} fpscr, {r.choice(SRC)}"
+        if kind == 17 and cond is None:
+            # VMOV.32 to or from a 32-bit scalar (gas does not assemble it
+            # for FPv4-SP; QEMU and the Arm ARM have it): Dd[x] <-> Rt.
+            rt = r.randrange(6)
+            d, x, to_core = r.randrange(16), r.getrandbits(1), r.getrandbits(1)
+            return f".inst.w 0x{0xEE000B10 | to_core << 20 | x << 21 | d << 16 | rt << 12:08x}"
+        return f"{c(r.choice(FP3), cond)}.f32 {sd}, {sn}, {sm}"
+
+    def reglist(self, max_words: int = 32) -> tuple[str, int]:
+        """A register list for VLDM/VSTM/VPUSH/VPOP and its size in words."""
+        r = self.r
+        if r.random() < 0.5 or max_words < 2:
+            first = r.randrange(32)
+            n = self.imm(1, min(32 - first, max_words))
+            return (f"{{s{first}-s{first + n - 1}}}" if n > 1 else f"{{s{first}}}"), n
+        first = r.randrange(16)
+        n = self.imm(1, min(16 - first, max_words // 2))
+        return (f"{{d{first}-d{first + n - 1}}}" if n > 1 else f"{{d{first}}}"), 2 * n
+
+    def fp_block(self) -> list[str]:
+        """A floating-point sequence: FPSCR controls, multiple transfers,
+        compare-and-branch flags, or a fault."""
+        r = self.r
+        # Each fault costs a handler run, so faults are 5 in 22.
+        kind = r.choices(["controls", "multiple", "push", "compare", "nocp", "nocp-cp", "f64",
+                          "unaligned", "bus"], weights=[8, 4, 2, 3, 1, 1, 1, 1, 1])[0]
+        if kind == "controls":  # new controls (and flags cleared, mostly)
+            return [f"ldr.w r4, =0x{self.fpscr_value():08x}", "vmsr fpscr, r4"]
+        if kind == "multiple":  # load/store multiple through r5
+            regs, words = self.reglist()
+            op = r.choice(["vldmia", "vstmia", "vldmdb", "vstmdb"])
+            wb = "!" if op.endswith("db") or r.random() < 0.5 else ""
+            start = self.imm(0, 64) * 4 + (128 if op.endswith("db") else 0)
+            return [f"add.w r5, r7, #{start}", f"{op} r5{wb}, {regs}"]
+        if kind == "push":  # push, work, pop
+            regs, words = self.reglist(16)
+            pop, _ = self.reglist(words) if r.random() < 0.3 else (regs, words)
+            middle = [self.fp_insn(None) for _ in range(self.imm(0, 3))]
+            middle = [m for m in middle if "sp" not in m]
+            return [f"vpush {regs}"] + middle + [f"vpop {regs if r.random() < 0.7 else pop}"]
+        if kind == "compare":  # compare, flags to APSR, conditional work
+            cnd = r.choice(CONDS)
+            return [f"{r.choice(['vcmp', 'vcmpe'])}.f32 {self.sreg()}, {self.sreg()}",
+                    "vmrs APSR_nzcv, fpscr", f"it {cnd}", self.fp_insn(cnd)]
+        if kind == "nocp":  # NOCP: access denied, then restored
+            return ["cpsie f"] + self.fp_store("CPACR", 0) + [self.fp_insn(None)] \
+                + self.fp_store("CPACR", 0x00F00000)
+        if kind == "nocp-cp":  # NOCP: a coprocessor that does not exist
+            cp = r.choice([0, 1, 7, 9, 12, 14, 15])
+            return ["cpsie f", f"mcr p{cp}, 0, r0, c0, c0, 0"]
+        if kind == "f64":  # UNDEFINED: double precision
+            return ["cpsie f", f".inst.w 0x{r.choice([0xEE300B00, 0xEEB00B40, 0xEE200B01, 0xEEB70AC0]):08x}"]
+        if kind == "unaligned":  # UNALIGNED (VLDR/VSTR/VLDM need word alignment)
+            op = r.choice([f"vldr {self.sreg()}, [r5]", f"vstr {self.dreg()}, [r5, #8]",
+                           f"vldmia r5, {{s{r.randrange(30)}-s31}}"])
+            return ["cpsie f", f"add.w r5, r7, #{r.choice([1, 2, 3])}", op]
+        # BusFault
+        return ["cpsie f", f"mov.w r5, #0x{UNMAPPED:08x}", f"vldr {self.sreg()}, [r5]"]
+
+
+FP_BASES = {"vadd", "vsub", "vmul", "vnmul", "vdiv", "vmla", "vmls", "vnmla", "vnmls", "vfma", "vfms",
+            "vfnma", "vfnms", "vabs", "vneg", "vsqrt", "vmov", "vcmp", "vcmpe", "vmrs", "vmsr",
+            "vcvt", "vcvtr", "vcvtb", "vcvtt", "vldr", "vstr", "vldmia", "vstmia", "vldmdb",
+            "vstmdb", "vpush", "vpop"}
+
+
+def fp_classify(mnemonic: str, operands: str) -> tuple[str, bool]:
+    """(class, conditional) of a floating-point instruction."""
+    operands = operands.split("@")[0].strip()
+    base, *types = mnemonic.split(".")
+    conditional = False
+    if base not in FP_BASES:
+        stripped = COND_SUFFIX.sub("", base)
+        if stripped in FP_BASES:
+            base, conditional = stripped, True
+    ops = [o.strip() for o in operands.split(",")]
+    kinds = "".join(o[0] for o in ops if o)
+    if "f64" in types:
+        name = "vfp f64 (undefined)"
+    elif base == "vmov":
+        if "#" in operands:
+            name = "vmov imm"
+        elif "[" in operands:
+            name = "vmov scalar " + ("to core" if kinds[0] == "r" else "from core")
+        else:
+            name = {"ss": "vmov reg", "rs": "vmov to core", "sr": "vmov from core",
+                    "rrss": "vmov 2 to core", "ssrr": "vmov 2 from core",
+                    "rrd": "vmov d to core", "drr": "vmov d from core"}.get(kinds, f"vmov {kinds}")
+    elif base in ("vcvt", "vcvtr"):
+        name = ".".join([base, *types]) + (" fixed" if "#" in operands else "")
+    elif base in ("vcvtb", "vcvtt"):
+        name = ".".join([base, *types])
+    elif base in ("vcmp", "vcmpe"):
+        name = base + (" zero" if "#" in operands else "")
+    elif base == "vmrs":
+        name = "vmrs apsr" if "APSR" in operands else "vmrs"
+    elif base in ("vldr", "vstr"):
+        name = base + (" d" if operands.startswith("d") else "") + (" literal" if "[pc" in operands else "")
+    elif base.startswith(("vldm", "vstm", "vpush", "vpop")):
+        name = base + (" d" if "{d" in operands else "") + ("!" if "!" in operands else "")
+    else:
+        name = base
+    return name, conditional
+
+
+REQUIRED_FP = {f"{m}.w" for m in [
+    *FP3, "vabs", "vneg", "vsqrt", "vmov reg", "vmov imm", "vmov to core", "vmov from core",
+    "vmov 2 to core", "vmov 2 from core", "vmov d to core", "vmov d from core",
+    "vmov scalar to core", "vmov scalar from core", "vcmp", "vcmpe", "vcmp zero", "vcmpe zero",
+    "vmrs", "vmrs apsr", "vmsr",
+    "vcvt.s32.f32", "vcvt.u32.f32", "vcvtr.s32.f32", "vcvtr.u32.f32", "vcvt.f32.s32", "vcvt.f32.u32",
+    *[f"vcvt.{t}.f32 fixed" for t, _ in FP_FIXED], *[f"vcvt.f32.{t} fixed" for t, _ in FP_FIXED],
+    "vcvtb.f32.f16", "vcvtt.f32.f16", "vcvtb.f16.f32", "vcvtt.f16.f32",
+    "vldr", "vstr", "vldr d", "vstr d", "vldr literal", "vldr d literal",
+    "vldmia", "vstmia", "vldmia!", "vstmia!", "vldmdb!", "vstmdb!",
+    "vldmia d", "vstmia d", "vldmia d!", "vstmia d!", "vldmdb d!", "vstmdb d!",
+    "vpush", "vpop", "vpush d", "vpop d", "vfp f64 (undefined)", "coprocessor (not cp10/cp11)"]}
+REQUIRED_FP_EVENTS = {"fault-nocp", "fp-ioc", "fp-dzc", "fp-ofc", "fp-ufc", "fp-ixc", "fp-idc",
+                      "fp-rn", "fp-rp", "fp-rm", "fp-rz", "fp-fz", "fp-dn", "fp-ahp"}
+
+
 # RAM compared at the end of every program: the data buffer (with the reach
 # of negative and register offsets around it) and the stacks (MSP, PSP).
 DUMP_REGIONS = [(0x20000E00, 0x3200), (0x202F0000, 0x10100)]
@@ -813,9 +1103,10 @@ def epilogue(dump: str) -> list[str]:
     return out
 
 
-def program(rnd: random.Random, length: int, lockup: bool = False, dump: str = "mem.bin") -> str:
-    g = Gen3(rnd)
-    lines = [".syntax unified", ".thumb", ".cpu cortex-m4",
+def program(rnd: random.Random, length: int, lockup: bool = False, dump: str = "mem.bin",
+            fpu: bool = False) -> str:
+    g = GenFP(rnd) if fpu else Gen3(rnd)
+    lines = [".syntax unified", ".thumb", ".cpu cortex-m4", *([".fpu fpv4-sp-d16"] if fpu else []),
              ".section .vectors, \"a\"", ".word 0x20400000", ".word reset + 1"] + \
         [f"    {v}" for v in g.vectors()] + \
         [".text", ".thumb_func", ".global reset", "reset:", ".global body_start"]
@@ -826,6 +1117,8 @@ def program(rnd: random.Random, length: int, lockup: bool = False, dump: str = "
     # registers, r7 = buffer, r6 = word-aligned index, SP in the middle of
     # RAM, random flags (from a CMP of two random values).
     lines += ["    ldr.n r7, 7f", "    b.n 6f", "    .p2align 2", "7:", "    .word 0x20001000", "6:"]
+    if isinstance(g, GenFP):
+        lines += [f"    {t}" for t in g.fp_init()]
     init_words = [rnd.getrandbits(32) for _ in range(16)]
     init_words[6] = rnd.randrange(0, 1024, 4)
     init_words[13] = 0x20300000
@@ -842,13 +1135,20 @@ def program(rnd: random.Random, length: int, lockup: bool = False, dump: str = "
     while emitted < length:
         before = emitted
         choice = rnd.random()
-        if choice < 0.06:                       # IT block
+        if isinstance(g, GenFP) and rnd.random() < 0.75:    # floating point
+            block = g.fp_block() if rnd.random() < 0.2 else [g.fp_insn(None)]
+            lines += [t if t.endswith(":") else f"    {t}" for t in block]
+            emitted += sum(1 for t in block if not t.endswith(":"))
+        elif choice < 0.06:                       # IT block
             n = rnd.randint(1, 4)
             first = rnd.choice(CONDS)
             pattern = "".join(rnd.choice("te") for _ in range(n - 1))
             lines.append(f"    it{pattern} {first}")
             conds = [first] + [first if p == "t" else INV[first] for p in pattern]
             for cnd in conds:
+                if isinstance(g, GenFP) and rnd.random() < 0.4:
+                    lines.append(f"    {g.fp_insn(cnd)}")
+                    continue
                 text = g.insn32(cnd) if rnd.random() < 0.5 else g.insn(cnd)
                 if text == "ADR":
                     text = f"{g.c('nop', cnd)}.n"
@@ -902,15 +1202,23 @@ def program(rnd: random.Random, length: int, lockup: bool = False, dump: str = "
     lines += g.handlers()
     lines += [".section .buf, \"aw\""]
     lines += [f"    .word 0x{w:08x}" for w in init_words]
-    lines += [f"    .word 0x{rnd.getrandbits(32):08x}" for _ in range(1024 - len(init_words))]
+    if isinstance(g, GenFP):
+        # Words 16-63 random, 64-319 floating-point test values (S0-S31
+        # start from words 64-95), the rest random.
+        lines += [f"    .word 0x{rnd.getrandbits(32):08x}" for _ in range(64 - len(init_words))]
+        lines += [f"    .word 0x{g.fp_value():08x}" for _ in range(FP_WORDS)]
+        lines += [f"    .word 0x{rnd.getrandbits(32):08x}" for _ in range(1024 - 64 - FP_WORDS)]
+    else:
+        lines += [f"    .word 0x{rnd.getrandbits(32):08x}" for _ in range(1024 - len(init_words))]
     return "\n".join(lines) + "\n"
 
 
 STATE = re.compile(r"^R00=")
 
 
-def parse(text: str) -> list[tuple[int, ...]]:
-    """States from a QEMU-format trace, consecutive duplicates removed.
+def parse(text: str, fpu: bool = False) -> list[tuple[int, ...]]:
+    """States from a QEMU-format trace, consecutive duplicates removed:
+    r0-r15 and xPSR, and with `fpu` S0-S31 and FPSCR (`-d fpu`).
 
     QEMU logs a state when it enters a translation block; if an exception
     became pending (an NVIC write), the block is left before its
@@ -919,11 +1227,20 @@ def parse(text: str) -> list[tuple[int, ...]]:
     out: list[tuple[int, ...]] = []
     regs: list[int] = []
     appended = False
+    xpsr = 0
+    last = "FPSCR: " if fpu else "XPSR="
     for line in text.splitlines():
         if line.startswith("R"):
             regs.extend(int(line[i:i + 8], 16) for i in (4, 17, 30, 43))
-        elif line.startswith("XPSR="):
-            state = (*regs, int(line[5:13], 16))
+        elif fpu and line.startswith("XPSR="):
+            xpsr = int(line[5:13], 16)
+        elif fpu and line.startswith("s") and line[3:4] == "=":
+            regs.extend((int(line[4:12], 16), int(line[17:25], 16)))
+        elif line.startswith(last):
+            if fpu:
+                state = (*regs[:16], xpsr, *regs[16:], int(line[7:15], 16))
+            else:
+                state = (*regs, int(line[5:13], 16))
             regs = []
             appended = not out or out[-1] != state
             if appended:
@@ -976,6 +1293,13 @@ COND_BRANCH = re.compile("^b" + COND + "$")
 def classify(hexwords: list[str], mnemonic: str, operands: str) -> tuple[str, bool]:
     """(instruction class, conditional by IT) of one disassembled instruction."""
     wide = len(hexwords) == 2
+    if wide and int(hexwords[0], 16) & 0xEC00 == 0xEC00 and (int(hexwords[1], 16) >> 9) & 7 != 5:
+        # MCR to a coprocessor that does not exist (objdump may call it by
+        # an old FPA name, such as FLTS for cp1).
+        return "coprocessor (not cp10/cp11).w", False
+    if mnemonic.startswith("v"):
+        name, conditional = fp_classify(mnemonic, operands)
+        return name + ".w", conditional
     mn = mnemonic.split(".")[0]
     # objdump prints ADR as "add/addw/subw Rd, pc, #imm".
     if mn in ("add", "addw", "subw") and ", pc, #" in operands:
@@ -1065,11 +1389,12 @@ def events(stderr: str) -> dict[str, int]:
 
 
 def names() -> list[str]:
-    return [f"r{i}" for i in range(13)] + ["sp", "lr", "pc", "xpsr"]
+    return [f"r{i}" for i in range(13)] + ["sp", "lr", "pc", "xpsr"] + [f"s{i}" for i in range(32)] \
+        + ["fpscr"]
 
 
-def check_program(n: int, seed_base: int, length: int, emu_path: str,
-                  work: Path) -> tuple[str | None, int, dict[str, int], dict[str, int]]:
+def check_program(n: int, seed_base: int, length: int, emu_path: str, work: Path,
+                  fpu: bool = False) -> tuple[str | None, int, dict[str, int], dict[str, int]]:
     """Generate, run and compare program n: (failure message or None,
     instructions compared, instruction classes, exception events)."""
     seed = seed_base * 100_000 + n
@@ -1079,7 +1404,7 @@ def check_program(n: int, seed_base: int, length: int, emu_path: str,
     events_seen: dict[str, int] = {}
     dump = f"p{n}.mem"
     (work / "emu").mkdir(exist_ok=True)
-    src.write_text(program(random.Random(seed), length, lockup, dump))
+    src.write_text(program(random.Random(seed), length, lockup, dump, fpu))
     subprocess.run(["arm-none-eabi-as", "-o", str(work / f"p{n}.o"), str(src)], check=True)
     subprocess.run(["arm-none-eabi-ld", "-T", str(work / "link.ld"), "--no-warn-rwx-segments",
                     "-o", str(elf), str(work / f"p{n}.o")], check=True)
@@ -1087,13 +1412,14 @@ def check_program(n: int, seed_base: int, length: int, emu_path: str,
     qemu = subprocess.run(["timeout", "60", "qemu-system-arm", "-machine", "mps2-an386", "-cpu",
                            "cortex-m4", "-nographic", "-monitor", "none", "-serial", "null",
                            "-semihosting-config", "enable=on,target=native",
-                           "-accel", "tcg,one-insn-per-tb=on", "-d", "cpu,exec,nochain",
+                           "-accel", "tcg,one-insn-per-tb=on", "-d", "cpu,fpu,exec,nochain" if fpu else "cpu,exec,nochain",
                            "-D", str(log), "-kernel", str(elf)], capture_output=True, cwd=work)
     fail = f"FAIL program {n} (seed {seed})"
     if qemu.returncode != 0 and not lockup:
         return f"{fail}: QEMU exited with {qemu.returncode}", 0, {}, {}
     # A bounded run: a broken emulator that loops must fail, not hang.
-    emu = subprocess.run([str(Path(emu_path).resolve()), str(elf), str(20 * length + 100_000)],
+    emu = subprocess.run([str(Path(emu_path).resolve()), str(elf), str(20 * length + 100_000),
+                          *(["--fpu"] if fpu else [])],
                          capture_output=True, text=True, cwd=work / "emu")
     # QEMU stops at a lockup with "qemu: fatal: Lockup"; the emulator must
     # stop there too, with Stop::Lockup.
@@ -1104,8 +1430,8 @@ def check_program(n: int, seed_base: int, length: int, emu_path: str,
                 f"{emu.stderr.strip()[-200:]}"), 0, {}, {}
     if locked:
         events_seen["lockup"] = 1
-    want = parse(text)
-    got = parse(emu.stdout)
+    want = parse(text, fpu)
+    got = parse(emu.stdout, fpu)
     symbols = {line.split()[2]: int(line.split()[0], 16) for line in
                subprocess.run(["arm-none-eabi-nm", str(elf)], capture_output=True, text=True)
                .stdout.splitlines() if len(line.split()) == 3}
@@ -1121,7 +1447,8 @@ def check_program(n: int, seed_base: int, length: int, emu_path: str,
         # Before the program sets the flags, QEMU's reset values (UNKNOWN
         # in the architecture) are not compared.
         started = started or w[15] == body
-        if (w if started else w[:16]) != (g if started else g[:16]):
+        # (Before body_start, xPSR is left out: index 16.)
+        if (w if started else w[:16] + w[17:]) != (g if started else g[:16] + g[17:]):
             diffs = [f"{nm}: qemu {a:08x} emu {b:08x}" for nm, a, b in zip(names(), w, g) if a != b]
             pc_prev = want[i - 1][15] if i else 0
             message = (f"{fail} at step {i}, after the instruction at {pc_prev:#x}: "
@@ -1170,8 +1497,17 @@ def main() -> int:
     ap.add_argument("--jobs", type=int, default=1, help="programs checked in parallel")
     ap.add_argument("--min-instructions", type=int, default=0,
                     help="fail unless at least this many instructions were compared")
+    ap.add_argument("--fpu", action="store_true",
+                    help="floating-point programs; S0-S31 and FPSCR are compared too")
+    ap.add_argument("--min-fp-instructions", type=int, default=0,
+                    help="fail unless at least this many floating-point instructions were compared")
     ap.add_argument("--keep")
     args = ap.parse_args()
+    # The integer run requires every integer class; the floating-point
+    # run, whose programs are mostly floating point, requires every
+    # floating-point class (and allows the integer ones).
+    required = REQUIRED_FP | {"conditional (IT).w"} if args.fpu else REQUIRED
+    allowed = REQUIRED | REQUIRED_FP if args.fpu else REQUIRED
 
     total = 0
     coverage: dict[str, int] = {}
@@ -1180,7 +1516,7 @@ def main() -> int:
         work = Path(args.keep or tmp)
         work.mkdir(parents=True, exist_ok=True)
         (work / "link.ld").write_text(LINKER)
-        jobs = [(n, args.seed, args.length, args.emu, work) for n in range(args.programs)]
+        jobs = [(n, args.seed, args.length, args.emu, work, args.fpu) for n in range(args.programs)]
         if args.jobs > 1:
             with ProcessPoolExecutor(max_workers=args.jobs) as pool:
                 results = list(pool.map(check_program, *zip(*jobs)))
@@ -1201,13 +1537,15 @@ def main() -> int:
                 event_counts[k] = event_counts.get(k, 0) + v
     print("exceptions: " + ", ".join(f"{k}={event_counts[k]}" for k in sorted(event_counts)))
     required_events = REQUIRED_EVENTS if args.programs > 7 else REQUIRED_EVENTS - {"lockup"}
+    if args.fpu:
+        required_events = required_events | REQUIRED_FP_EVENTS
     missing_events = sorted(e for e in required_events if event_counts.get(e, 0) == 0)
     if missing_events:
         print(f"emu-difftest: FAIL (exception events never happened: {', '.join(missing_events)})")
         return 1
-    missing = sorted(REQUIRED - set(coverage))
+    missing = sorted(required - set(coverage))
     print("executed: " + ", ".join(f"{k}={coverage[k]}" for k in sorted(coverage)))
-    unexpected = sorted(set(coverage) - REQUIRED)
+    unexpected = sorted(set(coverage) - allowed)
     if unexpected:
         print(f"emu-difftest: FAIL (unclassified instructions executed: {', '.join(unexpected)})")
         return 1
@@ -1220,10 +1558,19 @@ def main() -> int:
         print(f"emu-difftest: FAIL (only {total} instructions compared, "
               f"{args.min_instructions} required)")
         return 1
+    fp_total = sum(v for k, v in coverage.items() if k in REQUIRED_FP and not k.startswith("coprocessor"))
+    if fp_total < args.min_fp_instructions:
+        print(f"emu-difftest: FAIL (only {fp_total} floating-point instructions compared, "
+              f"{args.min_fp_instructions} required)")
+        return 1
+    if args.fpu:
+        classes = (f"{fp_total} of them floating point, all {len(REQUIRED_FP)} floating-point "
+                   "instruction classes executed (in IT blocks too)")
+    else:
+        classes = f"all {len(required)} instruction classes executed"
+    entries = sum(v for k, v in event_counts.items() if k.startswith("entry"))
     print(f"emu-difftest: PASS ({args.programs} programs, {total} instructions identical to QEMU, "
-          f"all {len(REQUIRED)} instruction classes executed, "
-          f"{sum(v for k, v in event_counts.items() if k.startswith('entry'))} exceptions taken, "
-          f"all {len(required_events)} kinds of exception event)")
+          f"{classes}, {entries} exceptions taken, all {len(required_events)} kinds of exception event)")
     return 0
 
 

@@ -90,7 +90,7 @@ Each exception entry shows:
 - **The exception:** its name (an interrupt `IRQn`, `SysTick`, a fault,
   `SVCall`, `PendSV`).
 - **What kind of entry it was:** for a fault, the causes the core
-  recorded (`invstate`, `undefinstr`, `unaligned`, `divbyzero`,
+  recorded (`invstate`, `undefinstr`, `nocp`, `unaligned`, `divbyzero`,
   `ibuserr`, ...); whether it was tail-chained or nested.
 - **Where it came from:** the instruction it interrupted, or the one
   that faulted. For a fault, it also shows the instruction executed just

@@ -3,9 +3,8 @@
 //!
 //! Each function implements one of the manual's decode tables; the table
 //! is named in the function's comment. Encodings the manual marks
-//! UNPREDICTABLE stop with [`Stop::Undefined`] instead of guessing, and
-//! coprocessor (floating-point) instructions stop with
-//! [`Stop::Unimplemented`] until milestone M7.
+//! UNPREDICTABLE stop with [`Stop::Undefined`] instead of guessing. The
+//! coprocessor space (floating point) is in `vfp.rs`.
 
 use super::{Cpu, Exec, Stop};
 use crate::alu::{add_with_carry, decode_imm_shift, shift_c, ShiftType};
@@ -91,7 +90,7 @@ impl Cpu {
                 } else if op2 & 0x60 == 0x20 {
                     self.dp_shifted_register(pc, insn)
                 } else {
-                    Err(Stop::Unimplemented { pc, insn }) // coprocessor
+                    self.coprocessor(bus, pc, insn)
                 }
             }
             2 => {
@@ -113,7 +112,7 @@ impl Cpu {
                 } else if op2 & 0x78 == 0x38 {
                     self.long_multiply_divide(pc, insn)
                 } else if op2 & 0x40 != 0 {
-                    Err(Stop::Unimplemented { pc, insn }) // coprocessor
+                    self.coprocessor(bus, pc, insn)
                 } else {
                     Err(Stop::Undefined { pc, insn })
                 }

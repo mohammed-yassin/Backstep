@@ -139,8 +139,10 @@ check.
   chip. If that handler changes (its frame, or how much stack it uses),
   `leave_trap_frame` in `backstep-replay` must change with it. The
   trace comparison and the 100 runs catch a mismatch.
-- Programs must not use the FPU while recording: the emulator has no FPU
-  yet (M7), and an extended exception frame is not modelled.
+- Programs must not use the FPU while recording: the recording does not
+  hold the floating-point registers yet, and an extended exception frame
+  is not modelled (M7; the emulator itself has the FPU since M7 part 1,
+  [ADR 0012](0012-floating-point.md)).
 - Interrupts on the process stack (PSP) are handled in the trap frame,
   but the key's hash and the tests cover the main stack only (ADR 0004).
   RTOS threads come in M8.

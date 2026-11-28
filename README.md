@@ -14,8 +14,9 @@ watchpoint finds the store that did it. Walkthrough: [docs/GDB.md](docs/GDB.md).
 > and the NUCLEO-F411RE image), exact replay with interrupts and crashes,
 > and GDB with reverse execution all work and are tested in CI (see
 > [TESTING.md](docs/TESTING.md)). The runs on a real board are queued for
-> [hardware verification](docs/HARDWARE_VERIFICATION.md). No FPU and no
-> RTOS threads yet. Binaries: [releases](https://github.com/mohammed-yassin/Backstep/releases);
+> [hardware verification](docs/HARDWARE_VERIFICATION.md). The emulator
+> has the FPU, but recording firmware that uses it, and RTOS threads,
+> come later. Binaries: [releases](https://github.com/mohammed-yassin/Backstep/releases);
 > what changed: [CHANGELOG](CHANGELOG.md); what comes next:
 > [roadmap](docs/ROADMAP.md).
 

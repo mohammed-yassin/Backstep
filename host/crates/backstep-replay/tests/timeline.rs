@@ -226,3 +226,18 @@ fn an_interrupt_callback_stops_a_long_run() {
     assert_eq!(t.run_back(&mut stop_now).unwrap(), Stop::Interrupted);
     assert!(polls >= 1);
 }
+
+#[test]
+fn a_recording_made_with_the_fpu_enabled_is_refused() {
+    // Its floating-point registers are not in the recording yet.
+    let (elf, mut rec) = load("irq_ambiguous.bsr");
+    rec.snapshot.scs.cpacr = 0x00F0_0000;
+    match Timeline::new(&elf, &rec, 1_000_000) {
+        Err(backstep_replay::ReplayError::Stopped {
+            instruction: 0,
+            stop: backstep_emu::Stop::Unsupported { what, .. },
+        }) => assert!(what.contains("FPU"), "{what}"),
+        Err(e) => panic!("wrong error: {e}"),
+        Ok(_) => panic!("replayed"),
+    }
+}
