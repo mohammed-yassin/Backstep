@@ -57,6 +57,8 @@ keeps it small enough for a microcontroller's RAM.
 - `backstep-replay`: the recording format and the replay engine
   ([ADR 0008](adr/0008-recording-format.md); interrupts and faults in
   [ADR 0009](adr/0009-replaying-interrupts.md)).
+- `backstep-gdb`: the GDB remote protocol server over a replay timeline
+  (reverse debugging, [ADR 0010](adr/0010-reverse-debugging.md)).
 - `backstep-cli`: the `backstep` command.
 - `unsafe` code is forbidden in the workspace (`unsafe_code = "forbid"`).
 - The emulator is written from scratch so the whole project stays MIT

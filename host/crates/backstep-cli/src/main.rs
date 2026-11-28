@@ -1,8 +1,8 @@
 //! `backstep` command-line tool.
 //!
-//! `info`, `crc32`, `inspect` (a recording's contents) and `replay`
-//! (re-run a recording on the emulator and check it). `gdb` arrives in M5
-//! (see `docs/ROADMAP.md`).
+//! `info`, `crc32`, `inspect` (a recording's contents), `replay` (re-run
+//! a recording on the emulator and check it) and `gdb` (debug a recording
+//! with GDB, forwards and backwards).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -45,6 +45,28 @@ enum Command {
         #[arg(long)]
         trace: Option<PathBuf>,
         /// Give up after this many instructions.
+        #[arg(long, default_value_t = 100_000_000)]
+        max_instructions: u64,
+    },
+    /// Debug a recording with GDB: check it as `replay` does, then serve
+    /// the GDB remote protocol. GDB can step, continue, use breakpoints
+    /// and watchpoints, and run backwards (reverse-step, reverse-continue,
+    /// reverse-next, reverse-finish).
+    ///
+    /// In GDB: `target remote localhost:<port>`, or with `--stdio`:
+    /// `target remote | backstep gdb --stdio <elf> <recording>`.
+    Gdb {
+        /// The firmware ELF that was recorded.
+        elf: PathBuf,
+        /// Recording file (.bsr).
+        recording: PathBuf,
+        /// TCP port to listen on (localhost only).
+        #[arg(long, default_value_t = 3333)]
+        port: u16,
+        /// Talk to GDB on stdin and stdout instead of TCP.
+        #[arg(long)]
+        stdio: bool,
+        /// Give up checking the recording after this many instructions.
         #[arg(long, default_value_t = 100_000_000)]
         max_instructions: u64,
     },
@@ -162,6 +184,58 @@ fn replay(
     }
 }
 
+fn load_elf(path: &PathBuf) -> Result<backstep_emu::elf::Elf, ExitCode> {
+    let bytes = read(path)?;
+    backstep_emu::elf::Elf::parse(bytes).map_err(|err| {
+        eprintln!("backstep: {}: {err}", path.display());
+        ExitCode::from(2)
+    })
+}
+
+fn gdb(
+    elf_path: &PathBuf,
+    recording: &PathBuf,
+    port: u16,
+    stdio: bool,
+    max_instructions: u64,
+) -> Result<ExitCode, ExitCode> {
+    let rec = load_recording(recording)?;
+    let elf = load_elf(elf_path)?;
+    let mut timeline =
+        backstep_replay::Timeline::new(&elf, &rec, max_instructions).map_err(|err| {
+            eprintln!("backstep gdb: the recording does not replay: {err}");
+            ExitCode::from(1)
+        })?;
+    eprintln!(
+        "backstep gdb: recording checked: {} instructions, {} interrupts",
+        timeline.end(),
+        rec.irqs.len()
+    );
+    let result = if stdio {
+        backstep_gdb::serve(&mut timeline, &mut backstep_gdb::StdioConnection::new())
+    } else {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", port)).map_err(|err| {
+            eprintln!("backstep gdb: cannot listen on 127.0.0.1:{port}: {err}");
+            ExitCode::from(2)
+        })?;
+        eprintln!(
+            "backstep gdb: waiting for GDB on 127.0.0.1:{port} (in GDB: target remote localhost:{port})"
+        );
+        let (stream, _) = listener.accept().map_err(|err| {
+            eprintln!("backstep gdb: {err}");
+            ExitCode::from(2)
+        })?;
+        backstep_gdb::serve(&mut timeline, &mut backstep_gdb::TcpConnection::new(stream))
+    };
+    match result {
+        Ok(_) => Ok(ExitCode::SUCCESS),
+        Err(err) => {
+            eprintln!("backstep gdb: connection: {err}");
+            Err(ExitCode::from(2))
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
@@ -194,6 +268,13 @@ fn main() -> ExitCode {
             trace,
             max_instructions,
         } => replay(&elf, &recording, trace.as_ref(), max_instructions).unwrap_or_else(|code| code),
+        Command::Gdb {
+            elf,
+            recording,
+            port,
+            stdio,
+            max_instructions,
+        } => gdb(&elf, &recording, port, stdio, max_instructions).unwrap_or_else(|code| code),
     }
 }
 

@@ -71,6 +71,8 @@ run_firmware() {
     make -C firmware replay-test
     step "Replay: nested interrupts from 3 sources at random rates, 100 of 100 QEMU runs replay exactly; crashes; traces vs QEMU; corrupted IRQS detected"
     make -C firmware replay-irq-test
+    step "GDB: 30 scripted sessions against backstep gdb (forwards and backwards, breakpoints, watchpoints, the demo bug)"
+    make -C firmware gdb-test
     step "Replay: NUCLEO-F411RE image records itself on QEMU netduinoplus2, sends the recording over USART2, replays identically"
     python3 scripts/qemu-nucleo-replay-smoke.py --backstep host/target/release/backstep \
         --elf firmware/build/nucleo-f411re/record_hw.elf

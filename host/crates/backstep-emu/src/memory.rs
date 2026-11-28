@@ -87,11 +87,32 @@ impl Region {
     }
 }
 
+/// Which accesses a watched range reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WatchKind {
+    /// Writes.
+    Write,
+    /// Reads.
+    Read,
+    /// Reads and writes.
+    Access,
+}
+
+impl WatchKind {
+    fn reports(self, write: bool) -> bool {
+        match self {
+            WatchKind::Write => write,
+            WatchKind::Read => !write,
+            WatchKind::Access => true,
+        }
+    }
+}
+
 /// Addresses watched for writes or reads (debugger watchpoints).
 #[derive(Debug, Clone, Default)]
 struct Watch {
-    /// `[start, end)` ranges and whether reads count too.
-    ranges: Vec<(u32, u32, bool)>,
+    /// `[start, end)` ranges and the accesses they report.
+    ranges: Vec<(u32, u32, WatchKind)>,
     /// The first watched access since the last [`Memory::take_watch_hit`].
     hit: Cell<Option<WatchHit>>,
 }
@@ -211,20 +232,25 @@ impl Memory {
         Some(true)
     }
 
-    /// Watch `[address, address + len)` for writes, and for reads too if
-    /// `reads`.
-    pub fn watch(&mut self, address: u32, len: u32, reads: bool) {
+    /// Watch `[address, address + len)` for the accesses `kind` names.
+    pub fn watch(&mut self, address: u32, len: u32, kind: WatchKind) {
         self.watch
             .ranges
-            .push((address, address.saturating_add(len), reads));
+            .push((address, address.saturating_add(len), kind));
     }
 
     /// Stop watching a range given to [`Memory::watch`].
-    pub fn unwatch(&mut self, address: u32, len: u32, reads: bool) {
-        let range = (address, address.saturating_add(len), reads);
+    pub fn unwatch(&mut self, address: u32, len: u32, kind: WatchKind) {
+        let range = (address, address.saturating_add(len), kind);
         if let Some(i) = self.watch.ranges.iter().position(|r| *r == range) {
             self.watch.ranges.remove(i);
         }
+    }
+
+    /// Stop watching everything, and forget a pending hit.
+    pub fn unwatch_all(&mut self) {
+        self.watch.ranges.clear();
+        self.watch.hit.set(None);
     }
 
     /// The first watched access since the last call, and forget it.
@@ -237,8 +263,8 @@ impl Memory {
             return;
         }
         let end = u64::from(address) + u64::from(size);
-        if self.watch.ranges.iter().any(|&(a, b, reads)| {
-            (write || reads) && u64::from(address) < u64::from(b) && end > u64::from(a)
+        if self.watch.ranges.iter().any(|&(a, b, kind)| {
+            kind.reports(write) && u64::from(address) < u64::from(b) && end > u64::from(a)
         }) {
             self.watch.hit.set(Some(WatchHit {
                 address,
@@ -339,7 +365,7 @@ mod tests {
     fn watched_accesses_are_reported_once() {
         let mut m = Memory::new();
         m.add_region(0x2000_0000, 0x100, true);
-        m.watch(0x2000_0010, 4, false);
+        m.watch(0x2000_0010, 4, WatchKind::Write);
         m.write(0x2000_000C, 4, 7); // just below
         let _ = m.read(0x2000_0010, 4); // a read, not watched for reads
         assert_eq!(m.take_watch_hit(), None);
@@ -360,8 +386,10 @@ mod tests {
         assert_eq!(m.peek(0x2000_0010, 4), Some(0x0000_0000));
         m.poke(0x2000_0010, 4, 5);
         assert_eq!(m.take_watch_hit(), None);
-        // Read watches.
-        m.watch(0x2000_0080, 8, true);
+        // Read watches report reads only; access watches both.
+        m.watch(0x2000_0080, 8, WatchKind::Read);
+        m.write(0x2000_0080, 4, 1);
+        assert_eq!(m.take_watch_hit(), None);
         let _ = m.read(0x2000_0084, 2);
         assert_eq!(
             m.take_watch_hit(),
@@ -371,8 +399,16 @@ mod tests {
                 write: false
             })
         );
-        m.unwatch(0x2000_0080, 8, true);
-        m.unwatch(0x2000_0010, 4, false);
+        m.unwatch(0x2000_0080, 8, WatchKind::Read);
+        m.watch(0x2000_00A0, 4, WatchKind::Access);
+        m.write(0x2000_00A0, 1, 1);
+        assert!(m.take_watch_hit().is_some_and(|h| h.write));
+        let _ = m.read(0x2000_00A2, 1);
+        assert!(m.take_watch_hit().is_some_and(|h| !h.write));
+        m.unwatch_all();
+        let _ = m.read(0x2000_00A2, 1);
+        assert_eq!(m.take_watch_hit(), None);
+        m.unwatch(0x2000_0010, 4, WatchKind::Write);
         m.write(0x2000_0010, 4, 1);
         let _ = m.read(0x2000_0084, 2);
         assert_eq!(m.take_watch_hit(), None);

@@ -158,7 +158,12 @@ verified against QEMU; see [ADR 0006](adr/0006-emulator.md) and
   that preempted another before its stub ran
   ([ADR 0009](adr/0009-replaying-interrupts.md)); copy-on-write emulator
   memory and watched accesses, the base for checkpoints.
-- Next: checkpoints and reverse execution, then the GDB server.
+- Part 2: checkpoints and reverse execution (`Timeline`), and the GDB
+  server, `backstep gdb` ([ADR 0010](adr/0010-reverse-debugging.md),
+  [guide](GDB.md)). `scripts/gdb-test.py` runs 30 scripted GDB sessions
+  in CI, among them a reverse watchpoint that stops on the store that
+  corrupted memory in `demo_overrun.c`.
+- Next: VS Code configuration, demo GIF, v0.1.0 binaries.
 
 **Acceptance criteria**
 - GDB server supports continue, step, breakpoints, watchpoints,
