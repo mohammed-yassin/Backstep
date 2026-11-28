@@ -70,13 +70,16 @@ def runs(lines: list[str]) -> dict[int, list[str]]:
 
 
 def interrupts(data: bytes) -> list[tuple[int, ...]]:
-    """The IRQS events of a recording (ADR 0008): 20 words each."""
+    """The IRQS events of a recording (ADR 0008): 20 words each, 21 (with
+    FPCCR) from format version 3."""
+    words = 21 if struct.unpack_from("<I", data, 4)[0] >= 3 else 20
     pos = 16
     for _ in range(struct.unpack_from("<I", data, 12)[0]):
         kind, length = data[pos:pos + 4], struct.unpack_from("<I", data, pos + 4)[0]
         if kind == b"IRQS":
             count = struct.unpack_from("<I", data, pos + 8)[0]
-            return [struct.unpack_from("<20I", data, pos + 20 + 80 * i) for i in range(count)]
+            return [struct.unpack_from(f"<{words}I", data, pos + 20 + 4 * words * i)
+                    for i in range(count)]
         pos += 12 + length
     return []
 

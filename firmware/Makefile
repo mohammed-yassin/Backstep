@@ -20,9 +20,10 @@ QEMU    ?= qemu-system-arm
 BUILD   := build
 ROOT    := ..
 
-# M0 builds soft-float on purpose: the replay emulator gains FPU support in
-# milestone M7. See docs/adr/0002-reference-targets.md.
+# The test images build soft-float (ADR 0002), except those that test
+# floating-point recording (M7), which build as STM32CubeIDE does.
 ARCHFLAGS := -mcpu=cortex-m4 -mthumb -mfloat-abi=soft
+FPUFLAGS := -mcpu=cortex-m4 -mthumb -mfloat-abi=hard -mfpu=fpv4-sp-d16 -fno-math-errno
 CFLAGS  := $(ARCHFLAGS) -std=c99 -O2 -g3 -Wall -Wextra -Werror -Wshadow \
            -Wstrict-prototypes -Wmissing-prototypes -ffreestanding \
            -ffunction-sections -fdata-sections \
@@ -40,6 +41,7 @@ QEMU_IRQ0  := $(BUILD)/qemu-mps2-an386/irq_position_test_O0.elf
 QEMU_SNAP  := $(BUILD)/qemu-mps2-an386/snapshot_test.elf
 QEMU_REPLAY := $(BUILD)/qemu-mps2-an386/replay_test.elf
 QEMU_REPLAY_IRQ := $(BUILD)/qemu-mps2-an386/replay_irq_test.elf
+QEMU_REPLAY_IRQ_FP := $(BUILD)/qemu-mps2-an386/replay_irq_test_fp.elf
 QEMU_DEMO := $(BUILD)/qemu-mps2-an386/demo_overrun.elf
 QEMU_DEMO_STACK := $(BUILD)/qemu-mps2-an386/demo_stack.elf
 QEMU_DEMO_RACE := $(BUILD)/qemu-mps2-an386/demo_race.elf
@@ -62,8 +64,8 @@ CLANG_FLAGS := --target=arm-none-eabi -mthumb -mcpu=cortex-m4 -mfloat-abi=soft \
                -fshort-enums \
                -ffunction-sections -fdata-sections
 
-.PHONY: all clean qemu-test cc-test irq-test snapshot-test replay-test replay-irq-test gdb-test why-test
-all: $(QEMU_ELF) $(QEMU_TRAP) $(CMP_MPU) $(QEMU_IRQ) $(QEMU_IRQ0) $(QEMU_SNAP) $(QEMU_REPLAY) $(QEMU_REPLAY_IRQ) $(QEMU_DEMO) $(QEMU_DEMO_STACK) $(QEMU_DEMO_RACE) $(NUCLEO_ELF) $(NUCLEO_ELF:.elf=.bin) $(NUCLEO_ELF:.elf=.hex) \
+.PHONY: all clean qemu-test cc-test irq-test snapshot-test replay-test replay-irq-test replay-irq-fp-test gdb-test why-test
+all: $(QEMU_ELF) $(QEMU_TRAP) $(CMP_MPU) $(QEMU_IRQ) $(QEMU_IRQ0) $(QEMU_SNAP) $(QEMU_REPLAY) $(QEMU_REPLAY_IRQ) $(QEMU_REPLAY_IRQ_FP) $(QEMU_DEMO) $(QEMU_DEMO_STACK) $(QEMU_DEMO_RACE) $(NUCLEO_ELF) $(NUCLEO_ELF:.elf=.bin) $(NUCLEO_ELF:.elf=.hex) \
      $(NUCLEO_TRAP) $(NUCLEO_TRAP:.elf=.bin) $(NUCLEO_EXCL) $(NUCLEO_EXCL:.elf=.bin) \
      $(NUCLEO_REC) $(NUCLEO_REC:.elf=.bin) $(NUCLEO_REC_IRQ) $(NUCLEO_REC_IRQ:.elf=.bin)
 
@@ -120,6 +122,13 @@ $(QEMU_REPLAY_IRQ): $(QEMU_DIR)/replay_irq_test.c $(COMMON_SRC) $(RECORD_SRC) $(
 	    -Wl,-Map=$(@:.elf=.map) -o $@ $(QEMU_DIR)/replay_irq_test.c $(COMMON_SRC) $(RECORD_SRC) -lgcc
 	$(SIZE) $@
 
+$(QEMU_REPLAY_IRQ_FP): $(QEMU_DIR)/replay_irq_test.c $(COMMON_SRC) $(RECORD_SRC) $(ROOT)/recorder/include/backstep_record.h $(ROOT)/recorder/include/backstep_irq.h $(QEMU_DIR)/link.ld common/qemu_test.h common/semihost.h
+	@mkdir -p $(@D)
+	$(CC) $(filter-out $(ARCHFLAGS),$(CFLAGS)) $(FPUFLAGS) -DBS_TEST_FPU -I $(ROOT)/recorder/src \
+	    $(filter-out $(ARCHFLAGS),$(LDFLAGS)) $(FPUFLAGS) -T $(QEMU_DIR)/link.ld \
+	    -Wl,-Map=$(@:.elf=.map) -o $@ $(QEMU_DIR)/replay_irq_test.c $(COMMON_SRC) $(RECORD_SRC) -lgcc
+	$(SIZE) $@
+
 $(BUILD)/qemu-mps2-an386/demo_%.elf: $(QEMU_DIR)/demo_%.c $(COMMON_SRC) $(RECORD_SRC) $(ROOT)/recorder/include/backstep_record.h $(ROOT)/recorder/include/backstep_irq.h $(QEMU_DIR)/link.ld common/qemu_test.h common/semihost.h
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -I $(ROOT)/recorder/src $(LDFLAGS) -T $(QEMU_DIR)/link.ld \
@@ -142,6 +151,11 @@ why-test: $(QEMU_REPLAY_IRQ) $(QEMU_DEMO) $(QEMU_DEMO_STACK) $(QEMU_DEMO_RACE)
 replay-irq-test: $(QEMU_REPLAY_IRQ)
 	python3 $(ROOT)/scripts/replay-irq-test.py --backstep $(ROOT)/host/target/release/backstep \
 	    --elf $(QEMU_REPLAY_IRQ)
+
+# The same with the FPU (M7): fewer runs, the trace compares S0-S31 too.
+replay-irq-fp-test: $(QEMU_REPLAY_IRQ_FP)
+	python3 $(ROOT)/scripts/replay-irq-test.py --backstep $(ROOT)/host/target/release/backstep \
+	    --elf $(QEMU_REPLAY_IRQ_FP) --fpu --runs 40 --crashes 5 --ambiguous 10 --traces 3
 
 snapshot-test: $(QEMU_SNAP)
 	$(ROOT)/scripts/snapshot-restore-test.sh $(QEMU_SNAP)

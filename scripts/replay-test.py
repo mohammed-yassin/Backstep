@@ -98,7 +98,8 @@ def chunks(data: bytes) -> list[tuple[bytes, bytearray]]:
 
 
 def sign(parts: list[tuple[bytes, bytearray]]) -> bytes:
-    version = 2 if any(kind == b"IRQS" for kind, _ in parts) else 1
+    kinds = {kind for kind, _ in parts}
+    version = 3 if b"FPUS" in kinds else 2 if b"IRQS" in kinds else 1
     body = bytearray(struct.pack("<4I", 0x43525342, version, 16, len(parts)))
     for kind, payload in parts:
         body += kind + struct.pack("<I", len(payload)) + payload + struct.pack("<I", zlib.crc32(payload))

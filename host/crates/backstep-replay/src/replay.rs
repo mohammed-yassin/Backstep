@@ -5,11 +5,13 @@ use std::fmt;
 use std::io::Write;
 
 use backstep_core::crc32::{crc32, update};
+use backstep_emu::cpu::vfp;
 use backstep_emu::elf::Elf;
+use backstep_emu::memory::NoBus;
 use backstep_emu::memory::{Bus, Fault};
 use backstep_emu::{Cpu, Memory, Scs, Stop};
 
-use crate::recording::{CpuState, IrqEvent, MmioEvent, Recording};
+use crate::recording::{CpuState, FpState, IrqEvent, MmioEvent, Recording};
 use crate::target::{self, Target};
 
 /// The peripheral region the recorder captures (ADR 0003).
@@ -133,6 +135,18 @@ pub enum ReplayError {
         /// Loads recorded.
         recorded: usize,
     },
+    /// At a recorded interrupt, FPCCR differs from the one the stub
+    /// recorded: the floating-point context diverged.
+    FpccrMismatch {
+        /// Instructions executed before it.
+        instruction: u64,
+        /// Index of the recorded interrupt.
+        index: usize,
+        /// FPCCR recorded at the stub's entry.
+        recorded: u32,
+        /// FPCCR in the replay.
+        replayed: u32,
+    },
     /// The end state differs from the recording.
     EndMismatch {
         /// What differs.
@@ -213,6 +227,15 @@ impl fmt::Display for ReplayError {
                 f,
                 "diverged: the end was reached after {replayed} of {recorded} recorded loads"
             ),
+            ReplayError::FpccrMismatch {
+                instruction,
+                index,
+                recorded,
+                replayed,
+            } => write!(
+                f,
+                "diverged at instruction {instruction}: at recorded interrupt #{index} FPCCR is {replayed:#010x}, recorded {recorded:#010x} (the floating-point context differs)"
+            ),
             ReplayError::EndMismatch {
                 what,
                 recorded,
@@ -254,13 +277,33 @@ const TRAP_STACK_BYTES: u32 = 520;
 fn leave_trap_frame(cpu: &mut Cpu, frame_on_psp: bool) -> u32 {
     let sp = cpu.r[13];
     let realign = cpu.scs.ccr & (1 << 9) != 0 && sp & 4 != 0;
-    let frame = sp.wrapping_sub(0x20) & !(u32::from(realign) << 2);
+    // With a floating-point context the frame is the extended one (26
+    // words), as the emulator's own exception entry makes it.
+    let fp = cpu.control & 4 != 0;
+    let size = if fp { 0x68 } else { 0x20 };
+    let frame = sp.wrapping_sub(size) & !(u32::from(realign) << 2);
     let xpsr = cpu.xpsr() | (u32::from(realign) << 9);
     let words = [
         cpu.r[0], cpu.r[1], cpu.r[2], cpu.r[3], cpu.r[12], cpu.r[14], cpu.r[15], xpsr,
     ];
     for (i, w) in words.iter().enumerate() {
         cpu.memory.poke(frame.wrapping_add(4 * i as u32), 4, *w);
+    }
+    if fp {
+        let area = frame.wrapping_add(0x20);
+        if cpu.scs.fpccr & vfp::fpccr::LSPEN != 0 {
+            // Lazy: the entry only reserves the space and updates FPCCR;
+            // the handler never uses the FPU (the recorder is built
+            // without FPU code), so its return just clears LSPACT.
+            cpu.update_fpccr(area);
+            cpu.scs.fpccr &= !vfp::fpccr::LSPACT;
+        } else {
+            // Stored at once (and loaded back by the return).
+            let regs: Vec<u32> = cpu.s[..16].iter().copied().chain([cpu.fpscr]).collect();
+            for (i, w) in regs.iter().enumerate() {
+                cpu.memory.poke(area.wrapping_add(4 * i as u32), 4, *w);
+            }
+        }
     }
     let top = if frame_on_psp { cpu.msp() } else { frame };
     for i in 0..TRAP_STACK_BYTES / 4 {
@@ -343,11 +386,12 @@ impl Bus for ReplayBus<'_> {
     }
 }
 
-/// Write the CPU state in the format of `qemu-system-arm -d cpu`.
+/// Write the CPU state in the format of `qemu-system-arm -d cpu` (with
+/// `fpu`, of `-d cpu,fpu`: S0-S31, D0-D15 and FPSCR too).
 ///
 /// # Errors
 /// Errors of the writer.
-pub fn write_state(cpu: &Cpu, out: &mut dyn Write) -> std::io::Result<()> {
+pub fn write_state(cpu: &Cpu, fpu: bool, out: &mut dyn Write) -> std::io::Result<()> {
     let r = &cpu.r;
     for row in 0..4 {
         let b = row * 4;
@@ -364,7 +408,21 @@ pub fn write_state(cpu: &Cpu, out: &mut dyn Write) -> std::io::Result<()> {
             r[b + 3]
         )?;
     }
-    writeln!(out, "XPSR={:08x}", cpu.xpsr())
+    writeln!(out, "XPSR={:08x}", cpu.xpsr())?;
+    if fpu {
+        for i in 0..16 {
+            let (lo, hi) = (cpu.s[2 * i], cpu.s[2 * i + 1]);
+            writeln!(
+                out,
+                "s{:02}={lo:08x} s{:02}={hi:08x} d{i:02}={:016x}",
+                2 * i,
+                2 * i + 1,
+                (u64::from(hi) << 32) | u64::from(lo)
+            )?;
+        }
+        writeln!(out, "FPSCR: {:08x}", cpu.fpscr)?;
+    }
+    Ok(())
 }
 
 /// Build the machine at the start of the recording.
@@ -398,16 +456,16 @@ fn start(elf: &Elf, rec: &Recording, target: &Target) -> Result<Cpu, ReplayError
             .load(region.address, &region.bytes)
             .map_err(|_| ReplayError::Elf(format!("snapshot region {:#010x}", region.address)))?;
     }
-    // The recorder does not save the floating-point registers yet (M7
-    // part 2): with the FPU enabled, replay could not start from the
+    // Recordings before format version 3 do not hold the floating-point
+    // registers: with the FPU enabled, replay could not start from the
     // recorded state, so it refuses instead of guessing.
-    if rec.snapshot.scs.cpacr & (3 << 20) != 0 {
+    if rec.snapshot.scs.cpacr & (3 << 20) != 0 && !rec.fp_start.valid {
         return Err(ReplayError::Stopped {
             instruction: 0,
             stop: Stop::Unsupported {
                 pc: rec.snapshot.cpu.pc & !1,
-                what: "recording made with the FPU enabled (CPACR): the floating-point \
-                       registers are not recorded yet (M7)",
+                what: "recording made with the FPU enabled (CPACR) but without the \
+                       floating-point registers (recorded before format version 3)",
             },
         });
     }
@@ -453,6 +511,15 @@ fn restore(cpu: &mut Cpu, rec: &Recording) {
         let n = 16 + irq;
         cpu.scs.enabled[n] = scs.nvic_iser[irq / 32] & (1 << (irq % 32)) != 0;
         cpu.scs.priority[n] = scs.nvic_ipr.get(irq).copied().unwrap_or(0) & mask;
+    }
+    cpu.scs.cpacr = scs.cpacr & vfp::CPACR_WRITABLE;
+    let fp = &rec.fp_start;
+    if fp.valid {
+        cpu.s = fp.s;
+        cpu.fpscr = fp.fpscr & backstep_emu::fpu::fpscr::WRITABLE;
+        cpu.scs.fpccr = fp.fpccr & vfp::fpccr::WRITABLE_ALL;
+        cpu.scs.fpcar = fp.fpcar & !7;
+        cpu.scs.fpdscr = fp.fpdscr & vfp::FPDSCR_WRITABLE;
     }
 }
 
@@ -510,6 +577,28 @@ fn compare_end(cpu: &Cpu, end: &CpuState) -> Result<(), ReplayError> {
     mismatch("control", end.control & 3, cpu.control & 3)
 }
 
+/// The floating-point registers and context at the end.
+fn compare_fp_end(cpu: &Cpu, fp: &FpState) -> Result<(), ReplayError> {
+    let mismatch = |what: String, recorded: u32, replayed: u32| {
+        if recorded == replayed {
+            Ok(())
+        } else {
+            Err(ReplayError::EndMismatch {
+                what,
+                recorded,
+                replayed,
+            })
+        }
+    };
+    for (i, (r, c)) in fp.s.iter().zip(cpu.s).enumerate() {
+        mismatch(format!("s{i}"), *r, c)?;
+    }
+    mismatch("fpscr".into(), fp.fpscr, cpu.fpscr)?;
+    mismatch("fpccr".into(), fp.fpccr, cpu.scs.fpccr)?;
+    mismatch("fpcar".into(), fp.fpcar & !7, cpu.scs.fpcar)?;
+    mismatch("fpdscr".into(), fp.fpdscr, cpu.scs.fpdscr)
+}
+
 /// At the end point: everything recorded was replayed, and the registers
 /// and RAM checksum are the recorded ones. Returns the RAM checksum.
 fn check_end(cpu: &Cpu, rec: &Recording, loads: usize, irqs: usize) -> Result<u32, ReplayError> {
@@ -527,6 +616,23 @@ fn check_end(cpu: &Cpu, rec: &Recording, loads: usize, irqs: usize) -> Result<u3
         });
     }
     compare_end(cpu, &rec.end.cpu)?;
+    // The end capture's first floating-point instruction may preserve
+    // floating-point state lazily (into RAM) and create a new context
+    // before the registers are read; do the same to a copy.
+    let mut after = cpu.clone();
+    let fp = &rec.fp_end;
+    let accessible = after.execute_fp_check(&mut NoBus).is_ok();
+    if accessible != fp.valid {
+        return Err(ReplayError::EndMismatch {
+            what: "access to the FPU (CPACR)".into(),
+            recorded: u32::from(fp.valid),
+            replayed: u32::from(accessible),
+        });
+    }
+    if fp.valid {
+        compare_fp_end(&after, fp)?;
+    }
+    let cpu = &after;
     let mut crc = 0;
     for &(address, len) in &rec.end.regions {
         let bytes: Vec<u8> = (0..len)
@@ -753,26 +859,56 @@ impl<'r> Engine<'r> {
 
     /// Take recorded interrupt `i` now.
     fn take(&self, m: &mut Machine, i: usize) -> Result<(), ReplayError> {
-        let exception = self.rec.irqs[i].exception;
+        let event = &self.rec.irqs[i];
+        let exception = event.exception;
         let number = exception as usize;
-        let mut bus = self.bus(m);
-        let taken = number >= 2
-            && number < self.exceptions
-            && m.cpu
-                .interrupt_now(&mut bus, number)
-                .map_err(|stop| ReplayError::Stopped {
-                    instruction: m.n,
-                    stop,
-                })?;
-        if taken {
-            Ok(())
-        } else {
-            Err(ReplayError::InterruptNotTaken {
-                instruction: m.n,
-                index: i,
-                exception,
-            })
+        let stopped = |stop| ReplayError::Stopped {
+            instruction: m.n,
+            stop,
+        };
+        let not_taken = ReplayError::InterruptNotTaken {
+            instruction: m.n,
+            index: i,
+            exception,
+        };
+        if number < 2 || number >= self.exceptions {
+            return Err(not_taken);
         }
+        let mut bus = self.bus(m);
+        // Right after an exception return, the interrupt either tail-chained
+        // (it was pending at the return) or arrived just after it. The
+        // integer state is the same either way, the floating-point state
+        // not; the FPCCR the stub recorded tells them apart (ADR 0012).
+        if let Some(fpccr) = event.fpccr {
+            let mut chained = m.cpu.clone();
+            if chained
+                .tail_chain_after_return(&mut bus, number)
+                .map_err(stopped)?
+                && chained.scs.fpccr == fpccr
+            {
+                let mut fresh = m.cpu.clone();
+                let fresh_ok = fresh.interrupt_now(&mut bus, number).map_err(stopped)?
+                    && fresh.scs.fpccr == fpccr;
+                if !fresh_ok {
+                    m.cpu = chained;
+                    return Ok(());
+                }
+            }
+        }
+        if !m.cpu.interrupt_now(&mut bus, number).map_err(stopped)? {
+            return Err(not_taken);
+        }
+        if let Some(fpccr) = event.fpccr {
+            if m.cpu.scs.fpccr != fpccr {
+                return Err(ReplayError::FpccrMismatch {
+                    instruction: m.n,
+                    index: i,
+                    recorded: fpccr,
+                    replayed: m.cpu.scs.fpccr,
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Execute the instruction at `m`'s position.
@@ -925,12 +1061,14 @@ pub fn replay(elf: &Elf, rec: &Recording, mut opts: Options<'_>) -> Result<Repor
     let (engine, start) = Engine::new(elf, rec)?;
     let verified = engine.verify(start.clone(), opts.max_instructions)?;
     if let Some(out) = opts.trace.as_deref_mut() {
-        // The trace of the replay that reproduced the recording.
+        // The trace of the replay that reproduced the recording; with the
+        // floating-point registers when the recording has them.
+        let fpu = rec.fp_start.valid;
         let mut m = start;
         let mut plan = verified.plan.clone();
         loop {
             engine.deliver(&mut m, &mut plan, false)?;
-            write_state(&m.cpu, out).map_err(|e| ReplayError::Elf(format!("trace: {e}")))?;
+            write_state(&m.cpu, fpu, out).map_err(|e| ReplayError::Elf(format!("trace: {e}")))?;
             if engine.at_end(&m) {
                 break;
             }

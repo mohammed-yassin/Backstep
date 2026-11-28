@@ -30,8 +30,12 @@ main code (checksums, a sort, recursion, peripheral polling, flag waits).
      checksums; re-signed edits (an interrupt's position, number, registers,
      stack hash, one event missing or added, dropped events) are caught.
 
+With --fpu (replay_irq_test_fp.elf, M7) the main code and two of the
+handlers use the FPU: interrupts and MPU traps then push extended frames,
+and the traces compare S0-S31 and FPSCR too (QEMU's -d cpu,fpu).
+
 Usage: replay-irq-test.py --backstep <backstep> --elf <replay_irq_test.elf>
-       [--runs N] [--traces N] [--crashes N]
+       [--runs N] [--traces N] [--crashes N] [--ambiguous N] [--fpu]
 
 SPDX-License-Identifier: MIT
 """
@@ -62,7 +66,7 @@ def _load(name: str, file: str):
 difftest = _load("emu_difftest", "emu-difftest.py")
 m3 = _load("replay_test", "replay-test.py")
 
-EVENT_WORDS = 20  # struct bs_irq_event
+EVENT_WORDS = 21  # struct bs_irq_event (with fpccr since M7)
 EVENT_BYTES = 4 * EVENT_WORDS
 IRQS_HEADER = 12  # count, dropped, stack top
 CAPTURE_FILES = ("mpu_trap.c", "thumb_ldst.c", "irq_record.c")
@@ -95,12 +99,13 @@ def inside(pc: int, ranges: list[tuple[int, int]]) -> bool:
     return any(a <= pc < b for a, b in ranges)
 
 
-def qemu(elf: Path, arg: str, work: Path, trace: Path | None = None) -> str:
+def qemu(elf: Path, arg: str, work: Path, trace: Path | None = None, fpu: bool = False) -> str:
     cmd = ["timeout", "120", "qemu-system-arm", "-machine", "mps2-an386", "-cpu", "cortex-m4",
            "-nographic", "-monitor", "none", "-serial", "stdio",
            "-semihosting-config", f"enable=on,target=native,arg={arg}", "-icount", "shift=0"]
     if trace is not None:
-        cmd += ["-accel", "tcg,one-insn-per-tb=on", "-d", "cpu,exec,nochain", "-D", str(trace)]
+        log = "cpu,fpu,exec,nochain" if fpu else "cpu,exec,nochain"
+        cmd += ["-accel", "tcg,one-insn-per-tb=on", "-d", log, "-D", str(trace)]
     r = subprocess.run(cmd + ["-kernel", str(elf)], cwd=work, capture_output=True, text=True)
     return r.stdout.replace("\r", "")
 
@@ -125,18 +130,49 @@ def filtered(states, capture, stubs) -> list[tuple[int, ...]]:
     return out
 
 
+def qemu_states(log: Path, fpu: bool, start_pc: int, stop_pc: int) -> list[tuple[int, ...]] | None:
+    """QEMU's states from the first at start_pc in thread mode to the next
+    at stop_pc, read in pieces (the log of a whole run with -d fpu is too
+    big to parse at once); None if start_pc never comes."""
+    out: list[tuple[int, ...]] | None = None   # None until start_pc
+
+    def take(states: list[tuple[int, ...]]) -> bool:
+        """Add the states of one piece; True once stop_pc is reached."""
+        nonlocal out
+        if out is None:
+            at = next((i for i, s in enumerate(states) if s[15] == start_pc and s[16] & 0x1FF == 0), None)
+            if at is None:
+                return False
+            out = [states[at]]
+            states = states[at + 1:]
+        stop = next((i for i, s in enumerate(states) if s[15] == stop_pc), None)
+        out += states if stop is None else states[:stop + 1]
+        return stop is not None
+
+    with log.open() as f:
+        piece: list[str] = []
+        for line in f:
+            # A piece ends before a "Trace" line, which starts a new state,
+            # so no state (or its "Stopped execution" line) is split.
+            if len(piece) >= 200_000 and line.startswith("Trace"):
+                if take(difftest.parse("".join(piece), fpu)):
+                    return out
+                piece = []
+            piece.append(line)
+        take(difftest.parse("".join(piece), fpu))
+    return out
+
+
 def compare_traces(qemu_log: Path, replay_trace: Path, stop_pc: int, capture,
-                   stubs) -> tuple[str | None, int]:
+                   stubs, fpu: bool = False) -> tuple[str | None, int]:
     """(None if QEMU's execution of the recorded stretch equals the replay,
     else the first difference; states compared)."""
-    replayed = filtered(difftest.parse(replay_trace.read_text()), capture, stubs)
-    states = difftest.parse(qemu_log.read_text())
+    replayed = filtered(difftest.parse(replay_trace.read_text(), fpu), capture, stubs)
     start_pc = replayed[0][15]
-    start = next((i for i, s in enumerate(states) if s[15] == start_pc and s[16] & 0x1FF == 0), None)
-    if start is None:
+    states = qemu_states(qemu_log, fpu, start_pc, stop_pc)
+    if states is None:
         return f"QEMU never reached the start pc {start_pc:#x}", 0
-    stop = next((i for i, s in enumerate(states) if i > start and s[15] == stop_pc), len(states) - 1)
-    recorded = filtered(states[start:stop + 1], capture, stubs)
+    recorded = filtered(states, capture, stubs)
     if recorded == replayed:
         return None, len(replayed)
     for i, (a, b) in enumerate(zip(recorded, replayed)):
@@ -185,6 +221,8 @@ def main() -> int:
     ap.add_argument("--crashes", type=int, default=10)
     ap.add_argument("--traces", type=int, default=4)
     ap.add_argument("--ambiguous", type=int, default=20)
+    ap.add_argument("--fpu", action="store_true",
+                    help="the image uses the FPU: traces compare S0-S31 and FPSCR too")
     args = ap.parse_args()
     backstep = str(Path(args.backstep).resolve())
     elf = Path(args.elf).resolve()
@@ -274,15 +312,15 @@ def main() -> int:
             work = Path(tmp) / f"t{s}{arg[0]}"
             work.mkdir()
             log = work / "qemu.log"
-            qemu(elf, arg, work, log)
+            qemu(elf, arg, work, log, args.fpu)
             rec = work / "recording.bsr"
             trace = work / "replay.trace"
             code, summary = replay(rec, trace)
             if code != 0:
                 check(False, f"trace run {arg}: replay", summary)
                 continue
-            diff, compared = compare_traces(log, trace, stop_pc, capture, stubs)
-            in_handlers = sum(s[16] & 0x1FF != 0 for s in difftest.parse(trace.read_text()))
+            diff, compared = compare_traces(log, trace, stop_pc, capture, stubs, args.fpu)
+            in_handlers = sum(s[16] & 0x1FF != 0 for s in difftest.parse(trace.read_text(), args.fpu))
             check(diff is None, f"trace run {arg}: {compared} replayed states identical to QEMU's "
                   f"({len(events(rec.read_bytes()))} interrupts, {in_handlers} states in handlers)",
                   diff or "")

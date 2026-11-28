@@ -34,11 +34,29 @@ its format version, and the tools say when they cannot read it).
   restore them on return. CI compares 1,000,000 floating-point
   instructions with QEMU.
 
+- Recording firmware that uses the FPU, built hard-float as STM32CubeIDE
+  builds it: the snapshot holds S0-S31, FPSCR, FPCCR, FPCAR and FPDSCR at
+  the start and the end; interrupts and MPU traps with a floating-point
+  context replay exactly, lazy state preservation included.
+
+### Fixed
+
+- The recorder gave an interrupt whose stub was preempted at its first
+  instruction several times in a row the read count of the last
+  preemption instead of the first (its true interruption point). Such
+  recordings are still not replayable (ADR 0009 lists the case).
+
 ### Changed
 
-- `backstep replay` refuses a recording made with the FPU enabled, with
-  a message: the recorder does not save the floating-point registers yet
-  (next M7 part).
+- Recording format version 3: an `FPUS` chunk, and FPCCR in every
+  interrupt event (which tells replay whether an interrupt tail-chained).
+  Versions 1 and 2 are still read; a version 2 recording made with the
+  FPU enabled is refused, with a message.
+- The recorder's sources build with `general-regs-only` on hard-float
+  GCC builds, so the capture code never touches the FPU.
+- Firmware that enables the FPU must do so before recording (as
+  `SystemInit` does); the test images' startup code does it for
+  hard-float builds.
 
 ## [0.1.0] - 2026-11-28
 

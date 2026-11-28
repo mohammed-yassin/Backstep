@@ -33,7 +33,15 @@ struct bs_irq_event {
     uint32_t xpsr;        /* xPSR of the interrupted context (pad bit cleared) */
     uint32_t mmio_index;  /* peripheral reads made before this point */
     uint32_t stack_hash;  /* bs_stack_hash() of the live stack top */
+    uint32_t fpccr;       /* FPCCR at the stub's entry, or BS_IRQ_NO_FPCCR (M7) */
 };
+
+/* bs_irq_event.fpccr when the FPU is disabled (CPACR cp10 = 0): there is
+ * then no floating-point context to tell apart. With it, replay tells an
+ * interrupt that tail-chained from the previous handler (FPCCR as that
+ * handler left it) from one that arrived right after the return (FPCCR
+ * set by its own entry): the two differ in the floating-point state. */
+#define BS_IRQ_NO_FPCCR 0xFFFFFFFFu
 
 /* Bytes of live stack (from the interrupted SP upwards) folded into
  * stack_hash. Optimised code may keep loop state in stack slots while
@@ -62,8 +70,10 @@ uint32_t bs_irq_record_count(void);
 /* Stop recording (later interrupts are neither logged nor counted). */
 void bs_irq_record_stop(void);
 
-/* Called by the stubs; not for direct use. */
-void bs_irq_record(const uint32_t *callee_r4_r11, const uint32_t *frame,
+/* Called by the stubs; not for direct use. callee holds r4-r11 and then
+ * the EXC_RETURN value the exception entered with (its bit 4 tells a basic
+ * frame from an extended, floating-point one). */
+void bs_irq_record(const uint32_t *callee, const uint32_t *frame,
                    uint32_t ipsr, uint32_t stub_address);
 
 /*

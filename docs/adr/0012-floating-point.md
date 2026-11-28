@@ -1,6 +1,6 @@
 # ADR 0012: The emulator's floating-point unit
 
-**Status:** Accepted (M7, parts 1 and 2)
+**Status:** Accepted (M7, parts 1 to 3)
 
 ## Context
 
@@ -106,6 +106,52 @@ CPACR forbidding the access that stacking, lazy preservation or
 unstacking needs (a NOCP fault in the middle of exception entry or
 return).
 
+**Recording firmware that uses the FPU** (part 3). Format version 3
+(ADR 0008) adds the FPUS chunk, the floating-point state at the start and
+at the end, and FPCCR to every interrupt event.
+
+- `bs_snapshot_take()` reads S0-S31, FPSCR, FPCCR, FPCAR and FPDSCR into
+  `bs_snapshot_fp` (in `.backstep`), when CPACR lets the current mode use
+  the FPU, and reloads S0-S31 and FPSCR before it returns, so the state
+  at the start depends only on what was recorded. Reading them executes
+  FP instructions, which may create a new floating-point context first
+  (FPCCR.ASPEN with CONTROL.FPCA clear): the FPSCR and CONTROL recorded
+  are those afterwards, and that is where replay starts. At the end,
+  replay applies the same `ExecuteFPCheck()` to a copy of its state
+  before comparing S0-S31, FPSCR, FPCCR, FPCAR and FPDSCR (and the RAM
+  checksum: lazy preservation may have written the stack).
+- The recorder's code must never touch the FP registers, because it
+  runs inside exceptions that replay reproduces without running it: an
+  FP instruction there would preserve the interrupted state lazily, into
+  memory. `recorder/src/bs_no_fpu.h` builds it with
+  `#pragma GCC target("general-regs-only")` on hard-float builds, and CI
+  checks the built image (`scripts/check-recorder-no-fpu.py`): only
+  `bs_snapshot_take` has FP instructions.
+- The interrupt stub records the interrupted SP above a 26-word frame
+  when `EXC_RETURN` says the frame is extended.
+- The MPU trap's exception is reproduced by `leave_trap_frame` with the
+  extended frame, and with FPCCR updated as the trap's lazy entry does
+  (LSPACT then cleared by its return; the handler never uses the FPU).
+- *Tail-chain or not.* An interrupt that tail-chained from the previous
+  handler and one that arrived just after that handler returned leave
+  the same integer state, so before M7 replay always did the latter. With
+  a floating-point context they differ: a tail-chain keeps the handler's
+  FP registers and FPCCR, a return restores the registers from the frame
+  and the new entry sets FPCCR again. QEMU, like the chip, does either,
+  depending on when the interrupt became pending. The stub records FPCCR,
+  and replay takes the interrupt as a tail-chain
+  (`Cpu::tail_chain_after_return`, which undoes the return's unstacking)
+  when that, and not a fresh entry, gives the recorded FPCCR. Any other
+  FPCCR difference is reported as a divergence at that interrupt. Found by
+  the trace comparison, which showed S6-S15 at a handler's entry
+  differing from QEMU's.
+- Left as a limit: with FPCCR.LSPEN clear (no lazy stacking), a
+  tail-chained handler starts with S0-S15 as the previous handler left
+  them while a fresh entry clears them (QEMU; UNKNOWN in the
+  architecture), and FPCCR cannot tell the two apart. Handlers never read
+  those values before writing them, so only the registers inside such a
+  handler can differ, not what the firmware computes.
+
 **An instruction that stops changes nothing.** Every FP instruction
 checks access, decodes and reads its operands (all of a VLDM's words)
 before it writes any register, so `Cpu::step` does not save the 33
@@ -158,14 +204,14 @@ chip.
 
 ## Consequences
 
-- The emulator runs firmware built for the FPU, exceptions included;
-  replaying recordings of such firmware needs the recorder to save the
-  floating-point state (next part).
-- The recording does not yet contain S0-S31, FPSCR, FPCCR or FPDSCR
-  (CPACR is in the snapshot since M3): the recorder snapshot and the
-  replay start state gain them in the next part.
-  Until then replay refuses a recording whose snapshot has the FPU
-  enabled, with a message saying so, rather than start from a guessed
+- Firmware built for the FPU (as STM32CubeIDE builds it) records and
+  replays exactly, exceptions and MPU traps with floating-point context
+  included: `make -C firmware replay-irq-fp-test` records 40 QEMU runs of
+  a hard-float image whose main code and two of three interrupt handlers
+  use the FPU, plus crashes and runs with ambiguous interrupt keys, and
+  compares five traces with QEMU's, S0-S31 and FPSCR included.
+- Recordings of format version 2 and earlier with the FPU enabled are
+  refused, with a message, rather than started from a guessed
   floating-point state.
 - The emulator grows by about 1,550 lines (a third of them the
   softfloat's own tests), and the trace tool prints the FP registers

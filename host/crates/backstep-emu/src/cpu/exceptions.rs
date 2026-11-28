@@ -194,6 +194,20 @@ pub const FAULT_CAUSES: [(&str, u32); 7] = [
     ("preciserr", cfsr::PRECISERR),
 ];
 
+/// The state of an exception return at its tail-chaining check, after
+/// the returning exception was deactivated and before unstacking.
+#[derive(Debug, Clone)]
+pub(super) struct ReturnPoint {
+    regs: super::Registers,
+    ipsr: u32,
+    s: [u32; 32],
+    fpscr: u32,
+    fpccr: u32,
+    pc: u32,
+    value: u32,
+    kind: usize,
+}
+
 /// Fixed priorities: Reset -3, NMI -2, `HardFault` -1.
 fn fixed_priority(n: usize) -> Option<i32> {
     match n {
@@ -354,6 +368,7 @@ impl Cpu {
     /// FPCCR records what lazy preservation needs; otherwise the registers
     /// are stored now and then, as QEMU does, cleared.
     fn take_exception(&mut self, bus: &mut dyn Bus, n: usize, ret: u32) -> Exec {
+        self.last_return = None;
         let fp = self.control & 4 != 0;
         let use_psp = self.using_psp();
         let sp = self.r[13];
@@ -442,10 +457,13 @@ impl Cpu {
         Ok(())
     }
 
-    /// `UpdateFPCCR`: remember where lazy preservation must write, and the
+    /// `UpdateFPCCR`, at an exception entry that reserves the floating-point
+    /// part of an extended frame at `area` (public for replay, which
+    /// reproduces exceptions the recorder takes without running them):
+    /// remember where lazy preservation must write, and the
     /// background context's privilege, mode and which faults are ready
     /// (could preempt it), as QEMU's `v7m_update_fpccr`.
-    fn update_fpccr(&mut self, area: u32) {
+    pub fn update_fpccr(&mut self, area: u32) {
         use vfp::fpccr::{BFRDY, HFRDY, LSPACT, MMRDY, MONRDY, THREAD, UFRDY, USER};
         let execution = self.execution_priority();
         let ready = |n: usize, enable: u32| {
@@ -512,6 +530,16 @@ impl Cpu {
                 return self.tail_chain(bus, pc, next, value);
             }
         }
+        let point = ReturnPoint {
+            regs: self.registers(),
+            ipsr: self.ipsr,
+            s: self.s,
+            fpscr: self.fpscr,
+            fpccr: self.scs.fpccr,
+            pc,
+            value,
+            kind,
+        };
         // In handler mode r13 is MSP and sp_banked is PSP.
         let frame = if psp { self.sp_banked } else { self.r[13] };
         let mut words = [0u32; 8];
@@ -556,7 +584,47 @@ impl Cpu {
             self.control &= !2;
         }
         self.stats.returns[kind] += 1;
+        self.last_return = Some(Box::new(point));
         Ok(())
+    }
+
+    /// Right after an instruction that returned from an exception and
+    /// unstacked: take exception `n` as if it had been pending at the
+    /// return, so that it tail-chained (B1.5.12) instead: the return is
+    /// undone (registers, floating-point registers and FPCCR as at its
+    /// tail-chaining check) and `n` is entered on the same frame.
+    ///
+    /// Replay needs this because an interrupt that tail-chained and one
+    /// that arrived right after the return leave the same integer state
+    /// but different floating-point state (the registers are not
+    /// restored on a tail-chain), and only the recording knows which
+    /// happened. Returns false, with nothing changed, if the last
+    /// instruction did not unstack, or if `n` could not have preempted the
+    /// context returned to.
+    ///
+    /// # Errors
+    /// As for exception entry.
+    pub fn tail_chain_after_return(&mut self, bus: &mut dyn Bus, n: usize) -> Result<bool, Stop> {
+        let Some(point) = self.last_return.as_deref().cloned() else {
+            return Ok(false);
+        };
+        let mut c = self.clone();
+        c.restore(point.regs);
+        c.ipsr = point.ipsr;
+        c.s = point.s;
+        c.fpscr = point.fpscr;
+        c.scs.fpccr = point.fpccr;
+        c.set_pending(n);
+        let preempts =
+            c.highest_pending() == Some(n) && c.group(c.priority(n)) < c.execution_priority();
+        if !preempts {
+            return Ok(false);
+        }
+        c.stats.returns[point.kind] -= 1;
+        c.last_return = None;
+        c.tail_chain(bus, point.pc, n, point.value)?;
+        *self = c;
+        Ok(true)
     }
 
     /// The floating-point part of an extended frame at `area` during

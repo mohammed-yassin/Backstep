@@ -20,6 +20,13 @@
  * replay must find the right one (ADR 0009, lookahead).
  * The recording goes to "recording.bsr".
  *
+ * Built with BS_TEST_FPU (replay_irq_test_fp.elf, hard float, M7), the
+ * FPU is enabled before recording, the main code does floating-point work
+ * between the integer work, and the SysTick and timer 1 handlers do too
+ * (timer 0's does not): interrupts then push extended frames, lazily, the
+ * handlers' first FP instruction preserves the main code's registers, and
+ * MPU traps happen with a floating-point context active.
+ *
  * SPDX-License-Identifier: MIT
  */
 #include <stdint.h>
@@ -98,6 +105,36 @@ static void callback_ok(void)
     fold(0x600Du);
 }
 
+#ifdef BS_TEST_FPU
+static volatile float g_fshared[8];
+
+static uint32_t float_bits(float f)
+{
+    union {
+        float f;
+        uint32_t u;
+    } v;
+    v.f = f;
+    return v.u;
+}
+
+/* Floating-point work: arithmetic, division, square root, conversions,
+ * compares; the result goes into the hash bit for bit. */
+static float float_work(uint32_t seed, unsigned n)
+{
+    float acc = (float)(seed & 0xFFFFu) / 3.0f;
+    unsigned i;
+    for (i = 0; i < n; ++i) {
+        float x = (float)(int32_t)(seed ^ (i * 0x9E3779B9u)) * 1.0e-6f;
+        acc = acc * 0.999f + __builtin_sqrtf(x * x + 1.0f) / (acc + 2.5f);
+        if (acc > 1000.0f) {
+            acc -= (float)(uint32_t)(acc / 7.0f);
+        }
+    }
+    return acc;
+}
+#endif
+
 void systick_isr(void);
 void timer0_isr(void);
 void timer1_isr(void);
@@ -108,6 +145,9 @@ void timer1_stub(void);
 void systick_isr(void)
 {
     uint32_t r = next_random();
+#ifdef BS_TEST_FPU
+    g_fshared[r & 7u] += float_work(r, 3u); /* lazy preservation of the main code's FP state */
+#endif
     REG32(SYST_RVR) = 3000u + (r % 9000u); /* next tick: random */
     REG32(SYST_CVR) = 0u;
     g_shared[r & 15u] += REG32(TIMER2 + T_VALUE);
@@ -135,6 +175,13 @@ void timer1_isr(void)
     for (i = 0; i < 24u; ++i) { /* long enough to be preempted */
         acc = acc * 31u + g_shared[i & 15u];
     }
+#ifdef BS_TEST_FPU
+    {
+        /* Floating-point work SysTick can preempt: a nested extended frame. */
+        float f = float_work(acc, 12u);
+        acc ^= float_bits(f + g_fshared[(r >> 3) & 7u]);
+    }
+#endif
     g_shared[r & 15u] = acc ^ REG32(TIMER1 + T_VALUE);
     g_flags[2]++;
     g_spin_stop = 1u;
@@ -223,6 +270,20 @@ static void round_of_work(uint32_t round)
         g_buf[j] = v;
     }
     fold(bs_crc32(g_buf, sizeof g_buf));
+#ifdef BS_TEST_FPU
+    {
+        /* Values live in FP registers across the interrupts that arrive
+         * during this loop. */
+        float a = (float)round, b = 0.5f;
+        for (i = 0; i < 32u; ++i) {
+            a = a * 1.0001f + (float)(g_buf[i] & 0xFFFFu) / 7.0f;
+            b = __builtin_sqrtf(a + b * b);
+            fold(float_bits(b) ^ REG32(TIMER2 + T_VALUE)); /* trapped load in FP context */
+        }
+        fold(float_bits(a + g_fshared[round & 7u]));
+        fold(__builtin_arm_get_fpscr());
+    }
+#endif
     fold(deep(6u + (round & 3u)));
     for (i = 0; i < 6u; ++i) {
         fold(REG32(TIMER2 + T_VALUE)); /* polling from the main code */

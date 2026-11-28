@@ -27,7 +27,7 @@ static int g_failures;
 
 /* A fake stack: exception frame (8 words) followed by live stack words. */
 static uint32_t g_stack[8 + 1 + 64];
-static uint32_t g_callee[8];
+static uint32_t g_callee[9]; /* r4-r11, then the stub's saved EXC_RETURN */
 static struct bs_irq_event g_log[4];
 static volatile uint32_t g_reads;
 
@@ -40,6 +40,7 @@ static void reset(void)
     for (i = 0; i < 8u; ++i) {
         g_callee[i] = 0x400u + i; /* r4..r11 */
     }
+    g_callee[8] = 0xFFFFFFF9u; /* thread mode, main stack, basic frame */
     g_stack[0] = 0xA0; /* r0 */
     g_stack[1] = 0xA1;
     g_stack[2] = 0xA2;
@@ -90,6 +91,27 @@ static void test_alignment_padding(void)
            "stack hash starts after the padding word");
 }
 
+static void test_extended_frame(void)
+{
+    /* EXC_RETURN bit 4 clear: the frame has 26 words (S0-S15, FPSCR and a
+     * reserved word after the basic 8), so the interrupted SP and its live
+     * stack start 104 bytes above it. */
+    const struct bs_irq_event *e = &g_log[0];
+    reset();
+    g_callee[8] = 0xFFFFFFE9u;
+    bs_irq_record_start(g_log, 4, &g_reads, &g_stack[8 + 64]);
+    bs_irq_record(g_callee, g_stack, 15u, 0x2001u);
+    EXPECT(e->sp == (uint32_t)(uintptr_t)&g_stack[26], "SP above the extended frame");
+    EXPECT(e->stack_hash == bs_stack_hash(&g_stack[26], BS_STACK_HASH_BYTES / 4u),
+           "stack hash above the extended frame");
+    reset();
+    g_callee[8] = 0xFFFFFFE9u;
+    g_stack[7] = 0x61000200u; /* and padded */
+    bs_irq_record_start(g_log, 4, &g_reads, &g_stack[8 + 64]);
+    bs_irq_record(g_callee, g_stack, 15u, 0x2001u);
+    EXPECT(e->sp == (uint32_t)(uintptr_t)&g_stack[27], "padding above an extended frame");
+}
+
 static void test_stack_top_clamps_hash(void)
 {
     reset();
@@ -125,6 +147,30 @@ static void test_preempted_at_stub_entry(void)
     g_stack[6] = 0x08001234u;
     bs_irq_record(g_callee, g_stack, 24u, 0x0081u);
     EXPECT(g_log[3].mmio_index == 9u, "otherwise the current count is used");
+}
+
+static void test_preempted_several_times_at_stub_entry(void)
+{
+    /* Three SysTick interrupts in a row preempt the outer stub at its first
+     * instruction (each returns there and the next arrives), and the
+     * handlers read in between: the outer event takes the count of the
+     * first, its true interruption point (found by the QEMU interrupt
+     * position test). */
+    unsigned k;
+    reset();
+    bs_irq_record_start(g_log, 4, &g_reads, &g_stack[8 + 64]);
+    g_reads = 64;
+    g_stack[6] = 0x00000080u;
+    g_stack[7] = 0x01000018u;
+    for (k = 0; k < 3u; ++k) {
+        bs_irq_record(g_callee, g_stack, 15u, 0x0479u);
+        g_reads += k; /* 64, 64, 65 when the next one is recorded */
+    }
+    g_stack[6] = 0x08001234u;
+    g_stack[7] = 0x61000000u;
+    bs_irq_record(g_callee, g_stack, 24u, 0x0081u);
+    EXPECT(g_log[2].mmio_index == 65u, "the third preemption saw 65 reads");
+    EXPECT(g_log[3].mmio_index == 64u, "outer event: the count before the first preemption");
 }
 
 static void test_capacity(void)
@@ -175,8 +221,10 @@ int main(void)
 {
     test_context_fields();
     test_alignment_padding();
+    test_extended_frame();
     test_stack_top_clamps_hash();
     test_preempted_at_stub_entry();
+    test_preempted_several_times_at_stub_entry();
     test_capacity();
     test_without_log_and_after_stop();
     test_hash_known_value();

@@ -3,6 +3,7 @@
  *
  * SPDX-License-Identifier: MIT
  */
+#include "bs_no_fpu.h"
 #include "backstep.h"
 
 uint32_t bs_version(void)

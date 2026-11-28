@@ -3,6 +3,7 @@
  *
  * SPDX-License-Identifier: MIT
  */
+#include "bs_no_fpu.h"
 #include "backstep.h"
 #include "backstep_snapshot.h"
 
@@ -44,7 +45,45 @@ __attribute__((naked)) int bs_snapshot_take(struct bs_cpu_state *cpu,
         "str r1, [r0, #80]\n\t"
         "mrs r1, faultmask\n\t"
         "str r1, [r0, #84]\n\t"
+        /* Floating-point state into bs_snapshot_fp, if CPACR lets this
+         * mode use cp10 (0b11, or 0b01 when privileged); before CONTROL,
+         * since the first FP instruction may set CONTROL.FPCA. */
+        ".fpu fpv4-sp-d16\n\t"
+        "movw r2, #:lower16:bs_snapshot_fp\n\t"
+        "movt r2, #:upper16:bs_snapshot_fp\n\t"
+        "movw r1, #0xED88\n\t"
+        "movt r1, #0xE000\n\t"
+        "ldr r1, [r1]\n\t"
+        "ubfx r1, r1, #20, #2\n\t"
+        "cmp r1, #3\n\t"
+        "beq 2f\n\t"
+        "cmp r1, #1\n\t"
+        "bne 3f\n\t"
+        "mrs r1, ipsr\n\t"
+        "cbnz r1, 2f\n\t"
         "mrs r1, control\n\t"
+        "tst r1, #1\n\t"
+        "bne 3f\n\t"
+        "2: mov r1, #1\n\t"
+        "str r1, [r2], #4\n\t"            /* valid */
+        "vstmia r2!, {s0-s31}\n\t"
+        "vmrs r1, fpscr\n\t"
+        "str r1, [r2], #4\n\t"
+        "movw r3, #0xEF34\n\t"             /* FPCCR, FPCAR, FPDSCR */
+        "movt r3, #0xE000\n\t"
+        "ldr r1, [r3]\n\t"
+        "str r1, [r2], #4\n\t"
+        "ldr r1, [r3, #4]\n\t"
+        "str r1, [r2], #4\n\t"
+        "ldr r1, [r3, #8]\n\t"
+        "str r1, [r2]\n\t"
+        "b 4f\n\t"
+        "3: mov r1, #0\n\t"               /* no FPU access: all zero */
+        "mov r3, #37\n\t"
+        "5: str r1, [r2], #4\n\t"
+        "subs r3, #1\n\t"
+        "bne 5b\n\t"
+        "4: mrs r1, control\n\t"
         "str r1, [r0, #88]\n\t"
         /* save(cpu) on the stack below the caller's SP (dead memory). */
         "push {r0, lr}\n\t"
@@ -59,6 +98,17 @@ __attribute__((naked)) int bs_snapshot_take(struct bs_cpu_state *cpu,
         "1: str r2, [r1], #4\n\t"
         "cmp r1, r3\n\t"
         "bne 1b\n\t"
+        /* The floating-point registers as recorded (save() does not
+         * touch them, the recorder being built without FPU code, but the
+         * state returned must depend only on the snapshot). */
+        "movw r2, #:lower16:bs_snapshot_fp\n\t"
+        "movt r2, #:upper16:bs_snapshot_fp\n\t"
+        "ldr r1, [r2], #4\n\t"
+        "cbz r1, 6f\n\t"
+        "vldmia r2!, {s0-s31}\n\t"
+        "ldr r1, [r2]\n\t"
+        "vmsr fpscr, r1\n\t"
+        "6:\n\t"
         /* Return with a state that depends only on the snapshot, so a
          * recording replays from it exactly: the caller's flags (and GE)
          * as at the call, the scratch registers r1-r3 and r12 zero. */
@@ -71,6 +121,8 @@ __attribute__((naked)) int bs_snapshot_take(struct bs_cpu_state *cpu,
         "mov.w r0, #0\n\t"
         "bx lr\n\t");
 }
+
+struct bs_fp_state bs_snapshot_fp BS_STATE;
 
 void bs_snapshot_header_build(struct bs_snapshot_header *hdr,
                               const struct bs_cpu_state *cpu,

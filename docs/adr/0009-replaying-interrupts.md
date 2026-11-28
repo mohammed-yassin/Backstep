@@ -139,10 +139,19 @@ check.
   chip. If that handler changes (its frame, or how much stack it uses),
   `leave_trap_frame` in `backstep-replay` must change with it. The
   trace comparison and the 100 runs catch a mismatch.
-- Programs must not use the FPU while recording: the recording does not
-  hold the floating-point registers yet, and an extended exception frame
-  is not modelled (M7; the emulator itself has the FPU since M7 part 1,
-  [ADR 0012](0012-floating-point.md)).
+- Programs using the FPU are supported since M7 part 3 (extended frames,
+  lazy preservation, and FPCCR in each event to tell a tail-chain from
+  an arrival right after a return: [ADR 0012](0012-floating-point.md)).
+- Repeated preemption at a stub's entry is not replayed yet: when two or
+  more interrupts in a row arrive at the first instruction of the same
+  stub (each handler returning there before the next one comes), replay
+  would have to deliver the outer interrupt ahead of the log order and
+  the inner ones between handler runs; it reports the recording as not
+  replayable (interrupts left) instead. The recorder logs such an outer
+  event with the read count of the first preemption, its true
+  interruption point (fixed in M7, found by the QEMU interrupt-position
+  test). Nested preemption (an interrupt preempting the stub of one that
+  preempted another stub) is replayed.
 - Interrupts on the process stack (PSP) are handled in the trap frame,
   but the key's hash and the tests cover the main stack only (ADR 0004).
   RTOS threads come in M8.
