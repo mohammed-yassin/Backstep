@@ -191,9 +191,11 @@ fn exception_entry_clears_the_exclusive_monitor() {
 
 #[test]
 fn unsupported_cases_stop_instead_of_guessing() {
-    // Floating-point context active (CONTROL.FPCA): extended frame (M7).
+    // An extended frame (CONTROL.FPCA) stored at once (no lazy stacking)
+    // while CPACR forbids access to the FPU: a derived NOCP fault.
     let mut cpu = cpu_with(&[0xDF00]);
     cpu.control = 4;
+    cpu.scs.fpccr = 0;
     assert!(matches!(
         cpu.step(&mut NoBus),
         Err(Stop::Unsupported { .. })

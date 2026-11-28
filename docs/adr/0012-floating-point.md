@@ -1,6 +1,6 @@
 # ADR 0012: The emulator's floating-point unit
 
-**Status:** Accepted (M7, part 1)
+**Status:** Accepted (M7, parts 1 and 2)
 
 ## Context
 
@@ -71,18 +71,40 @@ does, and each such case is queued for the board in
   assembler refuses it for FPv4-SP.
 - VCVT from fixed point rounds to nearest whatever FPSCR says; VCVT to
   fixed point rounds towards zero (here QEMU and the manual agree).
+- After an extended frame is stored at once (FPCCR.LSPEN clear),
+  S0-S15 and FPSCR are zero (UNKNOWN in the architecture).
+- FPCCR.UFRDY (bit 10, an ARMv8-M bit) is set when a UsageFault could
+  have preempted the interrupted context.
+- `ExecuteFPCheck()`'s effects remain when the instruction faults.
 
 QEMU's decoder calls the two fused negated forms by each other's names
 (its "VFNMA" is the manual's VFNMS); the results per encoding are the
 same, and the emulator uses the manual's names.
 
-**Not yet:** an exception taken with CONTROL.FPCA set (an extended,
-26-word frame, lazy state preservation, `EXC_RETURN` with bit 4 clear)
-stops replay with `Stop::Unsupported`, and so does an FP instruction
-with FPCCR.LSPACT set. That is part 2 of M7. Until then a recording that
-takes an interrupt after using the FPU does not replay; firmware that
-clears FPCCR.ASPEN (and does not rely on the hardware saving FP
-registers) does.
+**Exceptions with a floating-point context** (part 2,
+`cpu/exceptions.rs`). With CONTROL.FPCA set, exception entry pushes the
+extended frame: 26 words, S0-S15 at +0x20, FPSCR at +0x60, a reserved
+word, and `EXC_RETURN` has bit 4 (FType) clear. With FPCCR.LSPEN (set
+after reset) the space is only reserved: FPCAR gets its address and
+FPCCR records LSPACT, the interrupted context's privilege (USER) and
+mode (THREAD), and which faults could have preempted it (HFRDY, MMRDY,
+BFRDY, UFRDY). The handler's first floating-point instruction then
+stores S0-S15 and FPSCR there (`PreserveFPState`) and clears LSPACT.
+Without LSPEN they are stored at once, and then cleared as QEMU does
+(the architecture leaves them UNKNOWN). On return from an extended
+frame, S0-S15 and FPSCR are loaded from it, unless LSPACT is still set
+(the handler never used the FPU, so the registers still hold the
+interrupted values: only LSPACT is cleared); CONTROL.FPCA is set again.
+Tail-chaining keeps the frame as it is and clears CONTROL.FPCA, as on
+any entry. As in QEMU, the effects of `ExecuteFPCheck()` (lazy
+preservation, a new context) remain when the instruction then faults,
+say a VLDR from an unaligned address.
+
+Still stopped as unsupported, because only broken firmware gets there:
+a fault while writing or reading the floating-point part of a frame, and
+CPACR forbidding the access that stacking, lazy preservation or
+unstacking needs (a NOCP fault in the middle of exception entry or
+return).
 
 **An instruction that stops changes nothing.** Every FP instruction
 checks access, decodes and reads its operands (all of a VLDM's words)
@@ -105,7 +127,14 @@ chip.
   with the integer registers, and memory at the end. The run requires
   all 75 floating-point instruction classes (the integer run requires the 287 integer ones) and
   every kind of event: NOCP, each of the six exception flags raised,
-  each rounding mode, FZ, DN and AHP in use. CI compares at least
+  each rounding mode, FZ, DN and AHP in use. FPCCR.ASPEN and LSPEN are
+  random (mostly both set, as after reset) and handlers use the FPU,
+  read FPCCR and FPCAR, and read or change the floating-point slots of
+  their frames, so extended frames, lazy preservation, lazy returns and
+  restores must all happen (they are counted). Floating-point programs
+  keep CCR.STKALIGN set: FPCAR has no bits 2:0, so an extended frame
+  that is not 8-byte aligned would be overwritten by lazy preservation,
+  in QEMU as on the chip. CI compares at least
   1,000,000 floating-point instructions (520 programs; 1,118,503 of
   3,962,814 instructions with seed 1, in which each exception flag was
   raised between 1,741 (DZC) and 121,626 (IXC) times).
@@ -129,12 +158,12 @@ chip.
 
 ## Consequences
 
-- The emulator runs firmware built for the FPU, as long as it takes no
-  exception with a floating-point context active; replaying recordings
-  of such firmware needs the recorder changes of part 2.
+- The emulator runs firmware built for the FPU, exceptions included;
+  replaying recordings of such firmware needs the recorder to save the
+  floating-point state (next part).
 - The recording does not yet contain S0-S31, FPSCR, FPCCR or FPDSCR
   (CPACR is in the snapshot since M3): the recorder snapshot and the
-  replay start state gain them in part 2, with the extended frames.
+  replay start state gain them in the next part.
   Until then replay refuses a recording whose snapshot has the FPU
   enabled, with a message saying so, rather than start from a guessed
   floating-point state.

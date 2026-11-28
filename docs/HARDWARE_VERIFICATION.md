@@ -13,7 +13,7 @@ Each entry has a script that prints a report block to paste below.
 | M2 | Exclusive monitor: LDREX/STREX and CLREX behave as required; measure STREX to another address, of another size, after a plain store and after an exception | `scripts/hil/m2_nucleo_f411re.py` | Pending |
 | M3 | Record polling code reading real STM32F411 registers, send the recording over the UART, replay it on the PC: every load reproduced, end registers and RAM checksum equal | `scripts/hil/m3_nucleo_f411re.py` | Pending |
 | M4 | Nested interrupts from 3 sources (SysTick, TIM3, TIM4) at random rates recorded on the board: 20 of 20 runs replay exactly on the PC, plus a run ended by a HardFault | `scripts/hil/m4_nucleo_f411re.py` | Pending |
-| M7 | Floating point on the STM32F411's FPU gives the emulator's results and FPSCR flags, including the cases where the emulator follows QEMU (listed below) | M7 part 2 adds the image and script | Pending |
+| M7 | Floating point on the STM32F411's FPU gives the emulator's results and FPSCR flags, including the cases where the emulator follows QEMU (listed below) | The image and script come with FPU recording (M7) | Pending |
 
 ## M0: blinky on NUCLEO-F411RE
 
@@ -121,8 +121,8 @@ board.
 The emulator's floating-point unit is checked against QEMU on 1,000,000
 instructions in CI ([ADR 0012](adr/0012-floating-point.md)). Where the
 architecture leaves room, the emulator does what QEMU does; these are
-the cases the board must confirm (the test image and script come with
-M7 part 2, together with recording firmware that uses the FPU):
+the cases the board must confirm (the test image and script come
+together with recording firmware that uses the FPU, later in M7):
 
 - A new floating-point context (FPCCR.ASPEN set, CONTROL.FPCA clear)
   sets all of FPSCR from FPDSCR: NZCV and the exception flags become 0.
@@ -131,5 +131,12 @@ M7 part 2, together with recording firmware that uses the FPU):
 - `VMOV.32 Dd[x], Rt` and `VMOV.32 Rt, Dd[x]` execute (the GNU assembler
   does not accept them for FPv4-SP).
 - VCVT from fixed point rounds to nearest whatever FPSCR.RMode says.
+- After an exception entry that stores the extended frame at once
+  (FPCCR.LSPEN clear), S0-S15 and FPSCR read as zero in the handler.
+- FPCCR.UFRDY (bit 10) is set at a lazy exception entry when a
+  UsageFault could have preempted the interrupted code.
+- An FP instruction that faults (say an unaligned VLDR) has still set
+  CONTROL.FPCA (and done lazy preservation): the fault's frame is an
+  extended one.
 
 **Report:** _not run yet_

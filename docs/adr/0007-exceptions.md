@@ -54,7 +54,8 @@ following the ARMv7-M Architecture Reference Manual, B1.5):
   debugging and unit tests).
 
 **What is not modelled, and stops instead of guessing**
-(`Stop::Unsupported`): floating-point frames (M7), faults during
+(`Stop::Unsupported`): floating-point frames (M7; emulated since M7
+part 2, see [ADR 0012](0012-floating-point.md)), faults during
 stacking or unstacking (derived faults), invalid exception returns
 (UsageFault INVPC, which only broken firmware triggers), SYSRESETREQ, and
 MemManage faults (no MPU model yet). Stores to unmapped addresses are

@@ -186,6 +186,8 @@ pub struct Cpu {
     exc_return: Option<u32>,
     /// The current stop is an instruction-fetch bus error.
     fetch_fault: bool,
+    /// The current instruction ran `ExecuteFPCheck()`.
+    fp_checked: bool,
 }
 
 /// External interrupts of a new [`Cpu`] (enough for every STM32F4; the
@@ -239,6 +241,7 @@ impl Cpu {
             instructions: 0,
             exc_return: None,
             fetch_fault: false,
+            fp_checked: false,
         }
     }
 
@@ -466,6 +469,7 @@ impl Cpu {
             u32::from(hw1)
         };
         let saved = self.registers();
+        self.fp_checked = false;
         let is_it = !wide && hw1 & 0xFF00 == 0xBF00 && hw1 & 0xF != 0;
         let in_it = self.in_it_block();
         let last = self.it & 0xF == 0x8;
@@ -487,7 +491,12 @@ impl Cpu {
             (true, true) => self.exec32(bus, pc, insn),
         };
         if let Err(stop) = result {
+            let fpca = self.control & 4;
             self.restore(saved);
+            if self.fp_checked {
+                // ExecuteFPCheck's effects stay (see vfp.rs).
+                self.control = (self.control & !4) | fpca;
+            }
             return Err(stop);
         }
         if in_it && !is_it {

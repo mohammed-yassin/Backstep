@@ -18,8 +18,10 @@
 //!   (QEMU's `vfp_access_check_m`): with FPCCR.ASPEN set and CONTROL.FPCA clear,
 //!   a new floating-point context is created (FPSCR = FPDSCR, FPCA = 1).
 //!
-//! An instruction that stops (fault, UNDEFINED) changes nothing: every
-//! instruction here checks and reads everything first and only then
+//! An instruction that stops (fault, UNDEFINED) changes nothing but what
+//! `ExecuteFPCheck()` did (lazy preservation, a new context: QEMU keeps
+//! those when the instruction then faults, and so does `Cpu::step`):
+//! every instruction here checks and reads everything first and only then
 //! writes registers, so `Cpu::step` need not save the floating-point
 //! registers. (A store multiple may have written some words before a bus
 //! fault, as STM does, and as on the real core.)
@@ -36,6 +38,21 @@ pub mod fpccr {
     pub const LSPEN: u32 = 1 << 30;
     /// Lazy state preservation is pending (space reserved, not written).
     pub const LSPACT: u32 = 1 << 0;
+    /// The background context was unprivileged.
+    pub const USER: u32 = 1 << 1;
+    /// The background context was thread mode.
+    pub const THREAD: u32 = 1 << 3;
+    /// `HardFault` could have preempted the background context.
+    pub const HFRDY: u32 = 1 << 4;
+    /// `MemManage` could have preempted it.
+    pub const MMRDY: u32 = 1 << 5;
+    /// `BusFault` could have preempted it.
+    pub const BFRDY: u32 = 1 << 6;
+    /// `DebugMonitor` could have preempted it.
+    pub const MONRDY: u32 = 1 << 8;
+    /// `UsageFault` could have preempted it (an ARMv8-M bit, but QEMU sets
+    /// it on ARMv7-M too; software cannot write it).
+    pub const UFRDY: u32 = 1 << 10;
     /// Reset value: ASPEN and LSPEN set.
     pub const RESET: u32 = ASPEN | LSPEN;
     /// The bits software can write (ASPEN, LSPEN, MONRDY, BFRDY, MMRDY,
@@ -95,28 +112,55 @@ impl Cpu {
     /// at, and the reserved value 0b10 denies access (the architecture
     /// makes both a cp11 field different from cp10 and 0b10
     /// UNPREDICTABLE).
-    fn fp_enabled(&self) -> bool {
+    pub(super) fn fp_enabled(&self) -> bool {
+        self.cpacr_allows(self.privileged())
+    }
+
+    pub(super) fn cpacr_allows(&self, privileged: bool) -> bool {
         match (self.scs.cpacr >> 20) & 3 {
             3 => true,
-            1 => self.privileged(),
+            1 => privileged,
             _ => false,
         }
     }
 
-    /// `ExecuteFPCheck()` after the access check: lazy state preservation,
-    /// then a new floating-point context if needed.
-    fn fp_context(&mut self, pc: u32) -> Exec {
+    /// `ExecuteFPCheck()` after the access check: lazy state preservation
+    /// (`PreserveFPState`) if pending, then a new floating-point context
+    /// if needed. Its effects stay even if the instruction then faults
+    /// (`Cpu::step` keeps them, as QEMU does).
+    fn fp_context(&mut self, bus: &mut dyn Bus, pc: u32) -> Exec {
         if self.scs.fpccr & fpccr::LSPACT != 0 {
-            return Err(Stop::Unsupported {
-                pc,
-                what: "lazy floating-point state preservation (M7)",
-            });
+            // The interrupted context's S0-S15 and FPSCR go into the
+            // space its exception entry reserved. That context must have
+            // had access to the FPU.
+            if !self.cpacr_allows(self.scs.fpccr & fpccr::USER == 0) {
+                return Err(Stop::Unsupported {
+                    pc,
+                    what: "CPACR forbids lazy floating-point state preservation (NOCP)",
+                });
+            }
+            let at = self.scs.fpcar;
+            let words: Vec<u32> = self.s[..16].iter().copied().chain([self.fpscr]).collect();
+            for (i, v) in words.iter().enumerate() {
+                if self
+                    .write(bus, pc, at.wrapping_add(4 * i as u32), 4, *v)
+                    .is_err()
+                {
+                    return Err(Stop::Unsupported {
+                        pc,
+                        what: "fault during lazy floating-point state preservation",
+                    });
+                }
+            }
+            self.scs.fpccr &= !fpccr::LSPACT;
+            self.stats.fp_lazy_saves += 1;
         }
         if self.scs.fpccr & fpccr::ASPEN != 0 && self.control & 4 == 0 {
             // QEMU sets the whole FPSCR from FPDSCR (flags cleared).
             self.fpscr = self.scs.fpdscr & FPDSCR_WRITABLE;
             self.control |= 4;
         }
+        self.fp_checked = true;
         Ok(())
     }
 
@@ -153,20 +197,20 @@ impl Cpu {
         let op1 = (hw1 >> 4) & 0x3F;
         if op1 & 0x20 == 0 {
             match op1 {
-                0x04 | 0x05 => self.vmov_64(pc, insn),
+                0x04 | 0x05 => self.vmov_64(bus, pc, insn),
                 0x00..=0x03 => undef,
                 _ => self.load_store(bus, pc, insn),
             }
         } else if insn & 0x10 == 0 {
-            self.fp_data_processing(pc, insn)
+            self.fp_data_processing(bus, pc, insn)
         } else {
-            self.transfer_32(pc, insn)
+            self.transfer_32(bus, pc, insn)
         }
     }
 
     /// A6.6 32-bit transfers: VMOV (core register to or from a single
     /// register or a 32-bit scalar), VMRS, VMSR.
-    fn transfer_32(&mut self, pc: u32, insn: u32) -> Exec {
+    fn transfer_32(&mut self, bus: &mut dyn Bus, pc: u32, insn: u32) -> Exec {
         let undef = Err(Stop::Undefined { pc, insn });
         let hw1 = insn >> 16;
         let to_core = hw1 & 0x10 != 0;
@@ -184,7 +228,7 @@ impl Cpu {
                 if rt >= 13 {
                     return undef;
                 }
-                self.fp_context(pc)?;
+                self.fp_context(bus, pc)?;
                 let s = sreg(vn, n_bit);
                 if to_core {
                     self.r[rt] = self.s[s];
@@ -202,7 +246,7 @@ impl Cpu {
                     if rt == 13 {
                         return undef;
                     }
-                    self.fp_context(pc)?;
+                    self.fp_context(bus, pc)?;
                     if rt == 15 {
                         // VMRS APSR_nzcv, FPSCR (Q is kept).
                         let v = self.fpscr;
@@ -217,7 +261,7 @@ impl Cpu {
                     if rt >= 13 {
                         return undef;
                     }
-                    self.fp_context(pc)?;
+                    self.fp_context(bus, pc)?;
                     self.fpscr = self.r[rt] & fpscr::WRITABLE;
                 }
                 Ok(())
@@ -230,7 +274,7 @@ impl Cpu {
                 if rt >= 13 {
                     return undef;
                 }
-                self.fp_context(pc)?;
+                self.fp_context(bus, pc)?;
                 let s = 2 * d + (a & 1) as usize;
                 if to_core {
                     self.r[rt] = self.s[s];
@@ -245,7 +289,7 @@ impl Cpu {
 
     /// A6.7 64-bit transfers: VMOV between two core registers and two
     /// single registers or a doubleword register.
-    fn vmov_64(&mut self, pc: u32, insn: u32) -> Exec {
+    fn vmov_64(&mut self, bus: &mut dyn Bus, pc: u32, insn: u32) -> Exec {
         let undef = Err(Stop::Undefined { pc, insn });
         let hw1 = insn >> 16;
         let to_core = hw1 & 0x10 != 0;
@@ -268,7 +312,7 @@ impl Cpu {
             };
             2 * d
         };
-        self.fp_context(pc)?;
+        self.fp_context(bus, pc)?;
         if to_core {
             self.r[rt] = self.s[first];
             self.r[rt2] = self.s[first + 1];
@@ -315,7 +359,7 @@ impl Cpu {
                 base.wrapping_sub(imm8 << 2)
             };
             let words = if double { 2 } else { 1 };
-            self.fp_context(pc)?;
+            self.fp_context(bus, pc)?;
             return self.transfer_words(bus, pc, address, first, words, load);
         }
         // VLDM/VSTM: increment after (P=0, U=1) or decrement before with
@@ -338,7 +382,7 @@ impl Cpu {
         if n == 15 && w {
             return undef;
         }
-        self.fp_context(pc)?;
+        self.fp_context(bus, pc)?;
         let start = if p {
             base.wrapping_sub(imm8 << 2)
         } else {
@@ -386,7 +430,7 @@ impl Cpu {
 
     /// A6.4 Floating-point data-processing instructions.
     #[allow(clippy::too_many_lines)]
-    fn fp_data_processing(&mut self, pc: u32, insn: u32) -> Exec {
+    fn fp_data_processing(&mut self, bus: &mut dyn Bus, pc: u32, insn: u32) -> Exec {
         let undef = Err(Stop::Undefined { pc, insn });
         if insn & 0x100 != 0 {
             return undef; // double precision: not on FPv4-SP
@@ -401,11 +445,11 @@ impl Cpu {
         match opc1 {
             0x0..=0x3 | 0x9 | 0xA => {}
             0x8 if !op => {}
-            0xB => return self.fp_other_data_processing(pc, insn, d, m),
+            0xB => return self.fp_other_data_processing(bus, pc, insn, d, m),
             _ => return undef,
         }
         // The context switch may set FPSCR, so the controls are read after.
-        self.fp_context(pc)?;
+        self.fp_context(bus, pc)?;
         let (sd, sn, sm) = (self.s[d], self.s[n], self.s[m]);
         let neg = |x: u32| x ^ 0x8000_0000;
         let mut env = self.env();
@@ -457,7 +501,14 @@ impl Cpu {
     /// The "other" data-processing instructions (opc1 = 1x11): VMOV
     /// (immediate, register), VABS, VNEG, VSQRT, VCVTB/VCVTT, VCMP(E),
     /// VCVT between floating point and integer or fixed point.
-    fn fp_other_data_processing(&mut self, pc: u32, insn: u32, d: usize, m: usize) -> Exec {
+    fn fp_other_data_processing(
+        &mut self,
+        bus: &mut dyn Bus,
+        pc: u32,
+        insn: u32,
+        d: usize,
+        m: usize,
+    ) -> Exec {
         let undef = Err(Stop::Undefined { pc, insn });
         let hw1 = insn >> 16;
         let opc2 = hw1 & 0xF;
@@ -467,7 +518,7 @@ impl Cpu {
             if insn & 0xB0 != 0 {
                 return undef;
             }
-            self.fp_context(pc)?;
+            self.fp_context(bus, pc)?;
             self.s[d] = fpu::expand_imm((opc2 << 4) | (insn & 0xF));
             return Ok(());
         }
@@ -486,7 +537,7 @@ impl Cpu {
             }
             _ => return undef,
         }
-        self.fp_context(pc)?;
+        self.fp_context(bus, pc)?;
         let mut env = self.env();
         let sm = self.s[m];
         let sd = self.s[d];
