@@ -12,7 +12,7 @@ Each entry has a script that prints a report block to paste below.
 | M1 | MPU trap on real STM32F411 registers: all load forms, stores, interrupts at priority 0x80 and 0, trapped console; cycles per trapped load (DWT) | `scripts/hil/m1_nucleo_f411re.py` | Pending |
 | M2 | Exclusive monitor: LDREX/STREX and CLREX behave as required; measure STREX to another address, of another size, after a plain store and after an exception | `scripts/hil/m2_nucleo_f411re.py` | Pending |
 | M3 | Record polling code reading real STM32F411 registers, send the recording over the UART, replay it on the PC: every load reproduced, end registers and RAM checksum equal | `scripts/hil/m3_nucleo_f411re.py` | Pending |
-| M4 | Nested interrupts from 3 sources at random rates recorded on the board, 20 of 20 runs replay exactly on the PC | added in M4 part 2 | Pending |
+| M4 | Nested interrupts from 3 sources (SysTick, TIM3, TIM4) at random rates recorded on the board: 20 of 20 runs replay exactly on the PC, plus a run ended by a HardFault | `scripts/hil/m4_nucleo_f411re.py` | Pending |
 
 ## M0: blinky on NUCLEO-F411RE
 
@@ -86,5 +86,31 @@ Pressing or holding the blue user button during the run is fine (PC13
 is read and changes the path taken). The same image and script run in
 CI on QEMU's netduinoplus2 (`scripts/qemu-nucleo-replay-smoke.py`).
 This check depends on the MPU trap working on the board (M1 check above).
+
+**Report:** _not run yet_
+
+## M4: interrupts recorded on NUCLEO-F411RE, replayed on the PC
+
+1. `make -C firmware` and `(cd host && cargo build --release)`
+2. Copy `firmware/build/nucleo-f411re/record_irq_hw.bin` onto the
+   `NODE_F411RE` drive.
+3. `python3 scripts/hil/m4_nucleo_f411re.py <serial-port>`
+4. Press RESET when asked. The board records 20 runs in which SysTick
+   (priority 0x40), TIM3 (0x80) and TIM4 (0xC0) interrupt the main code
+   at random rates and nest, then a 21st run that the SysTick handler
+   crashes on purpose (a corrupted function pointer; the HardFault ends
+   the recording). It sends every recording as hex; this takes about two
+   minutes. The script saves them as `run-<n>.bsr` and replays each with
+   `backstep replay`. Every one must reproduce every interrupt at its
+   recorded position, every load, and the end registers and RAM checksum.
+   Each of the 20 runs must have been interrupted by all three sources,
+   and some interrupts must have nested. Paste the report block here.
+
+The same image and script run in CI on QEMU's netduinoplus2
+(`scripts/qemu-nucleo-irq-smoke.py`). QEMU's STM32 timer model fires
+TIM3 and TIM4 mostly in the first run, so there the three sources are
+required over all runs together; the board must show them in every run.
+This check depends on the MPU trap (M1) and the M3 replay working on the
+board.
 
 **Report:** _not run yet_

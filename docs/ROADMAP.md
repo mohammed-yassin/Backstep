@@ -16,7 +16,7 @@ Status legend: **Done** (merged, automated criteria met) ·
 | M1 | Prototypes for the risky parts | Done (hardware check pending) |
 | M2 | Cortex-M4 emulator | Done (hardware measurement pending) |
 | M3 | First recording and replay (no interrupts) | Done (hardware check pending) |
-| M4 | Interrupts and faults | In progress (part 1, QEMU, done) |
+| M4 | Interrupts and faults | Done (hardware check pending) |
 | M5 | GDB with step-back, v0.1 release | Planned |
 | M6 | "Who wrote this?" queries | Planned |
 | M7 | Real-world STM32 firmware (FPU, DMA, HAL) | Planned |
@@ -128,7 +128,7 @@ verified against QEMU; see [ADR 0006](adr/0006-emulator.md) and
 
 ## M4: Interrupts and faults
 
-**Status: part 1 done; part 2 (the NUCLEO-F411RE test) next.**
+**Status: done.**
 
 - Part 1: the recording format's version 2 adds the interrupt log (IRQS
   chunk), and replay delivers every interrupt at its recorded position
@@ -138,8 +138,12 @@ verified against QEMU; see [ADR 0006](adr/0006-emulator.md) and
   interrupts, 1,814 nested), plus
   10 crash recordings ended by a HardFault, and compares QEMU's trace
   with the replay's state for state, handlers included.
-- Part 2: the same test on the NUCLEO-F411RE, over the UART, checked in
-  CI on QEMU's netduinoplus2.
+- Part 2 brings it to the NUCLEO-F411RE (`record_irq_hw.c`): 20 runs with
+  SysTick, TIM3 and TIM4 interrupts and a run ended by a HardFault, sent
+  over the UART and replayed by `scripts/hil/m4_nucleo_f411re.py`. In CI
+  the same image and script run on QEMU's netduinoplus2
+  (`scripts/qemu-nucleo-irq-smoke.py`).
+- *Hardware (pending):* the run on the real board.
 
 **Acceptance criteria**
 - Nested interrupts from 3 sources at random rates replay exactly in

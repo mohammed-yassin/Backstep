@@ -74,6 +74,9 @@ run_firmware() {
     step "Replay: NUCLEO-F411RE image records itself on QEMU netduinoplus2, sends the recording over USART2, replays identically"
     python3 scripts/qemu-nucleo-replay-smoke.py --backstep host/target/release/backstep \
         --elf firmware/build/nucleo-f411re/record_hw.elf
+    step "Replay: NUCLEO-F411RE interrupt image records 20 runs and a crash on QEMU netduinoplus2, all replay exactly"
+    python3 scripts/qemu-nucleo-irq-smoke.py --backstep host/target/release/backstep \
+        --elf firmware/build/nucleo-f411re/record_irq_hw.elf
     step "Hardware test scripts: self-test against a simulated board"
     python3 scripts/hil/test_hil_scripts.py
 }

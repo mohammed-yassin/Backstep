@@ -11,10 +11,11 @@ did on the real chip, then replay that exact execution on your PC and step
 > exception model identically to QEMU, checked over 1,000,000 instructions
 > on every change. M3 is done: polling programs recorded on QEMU (and on
 > the NUCLEO-F411RE image) are replayed by `backstep replay` instruction
-> for instruction, and corrupted recordings are rejected. M4 is under way:
+> for instruction, and corrupted recordings are rejected. M4 is done:
 > programs with nested interrupts from three sources, and crashes, replay
-> exactly in 100 of 100 QEMU runs; the board test comes next. The board
-> runs are queued for hardware verification. See the
+> exactly in 100 of 100 QEMU runs, and the NUCLEO-F411RE image records and
+> replays 20 interrupt-driven runs and a crash. The board runs are queued
+> for hardware verification. Next is M5, GDB with step-back. See the
 > [roadmap](docs/ROADMAP.md) for what works today and what comes next.
 
 ---
