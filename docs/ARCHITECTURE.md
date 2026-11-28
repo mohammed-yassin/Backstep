@@ -52,7 +52,8 @@ keeps it small enough for a microcontroller's RAM.
 ### Host tools (`host/`, Rust)
 
 - `backstep-core`: recording format, checksums, replay engine.
-- `backstep-emu`: the Cortex-M4 emulator ([ADR 0006](adr/0006-emulator.md)).
+- `backstep-emu`: the Cortex-M4 emulator ([ADR 0006](adr/0006-emulator.md),
+  exceptions in [ADR 0007](adr/0007-exceptions.md)).
 - `backstep-cli`: the `backstep` command.
 - `unsafe` code is forbidden in the workspace (`unsafe_code = "forbid"`).
 - The emulator is written from scratch so the whole project stays MIT

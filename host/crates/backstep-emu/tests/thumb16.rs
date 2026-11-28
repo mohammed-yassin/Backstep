@@ -20,6 +20,7 @@ fn cpu_with(code: &[u16]) -> Cpu {
     m.load(4, &(CODE | 1).to_le_bytes()).unwrap();
     let mut cpu = Cpu::new(m);
     cpu.reset(0).unwrap();
+    cpu.exceptions = false; // these tests check where execution stops
     cpu
 }
 

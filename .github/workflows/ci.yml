@@ -70,6 +70,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview   # emulator coverage (scripts/emu-coverage.sh)
       - name: Install Arm toolchain, QEMU, Clang/LLVM and pyserial
         run: |
           sudo apt-get update

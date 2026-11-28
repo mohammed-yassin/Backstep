@@ -14,7 +14,7 @@ Status legend: **Done** (merged, automated criteria met) ·
 |---|-----------|--------|
 | M0 | Foundation | Done (hardware check pending) |
 | M1 | Prototypes for the risky parts | Done (hardware check pending) |
-| M2 | Cortex-M4 emulator | In progress (16-bit Thumb and 32-bit Thumb-2 done) |
+| M2 | Cortex-M4 emulator | Done (hardware measurement pending) |
 | M3 | First recording and replay (no interrupts) | Planned |
 | M4 | Interrupts and faults | Planned |
 | M5 | GDB with step-back, v0.1 release | Planned |
@@ -80,11 +80,24 @@ identical continuation, every part shown necessary).
 **Goal:** a Rust emulator for the ARMv7E-M Thumb/Thumb-2 integer
 instruction set, exception entry and return.
 
-**Progress:** part 1 (all 16-bit Thumb instructions, IT blocks, ELF
-loader) and part 2 (all 32-bit Thumb-2 integer and DSP instructions,
-special registers, exclusives) are verified against QEMU; see
-[ADR 0006](adr/0006-emulator.md). Part 3 adds exceptions and the
-1,000,000-instruction run. Floating point follows in M7.
+**Status: done.** Part 1 (all 16-bit Thumb instructions, IT blocks, ELF
+loader), part 2 (all 32-bit Thumb-2 integer and DSP instructions,
+special registers, exclusives) and part 3 (exceptions: entry, return,
+tail-chaining, priorities, faults, lockup, the SCB/NVIC registers) are
+verified against QEMU; see [ADR 0006](adr/0006-emulator.md) and
+[ADR 0007](adr/0007-exceptions.md). Floating point follows in M7.
+
+- CI compares 1,000,000 instructions of random programs with QEMU on
+  every change: the registers and xPSR before every instruction, and the
+  data and stack RAM at the end of every program. The test counts
+  instructions, not separate programs: each program is a random
+  sequence of about 2,300 instructions with exceptions, and 460 of them
+  are compared per run.
+- Coverage of the decoder and exception model (`scripts/emu-coverage.sh`)
+  is 93.3% of lines and 95.4% of regions, with every function executed.
+- *Hardware (pending):* the STM32F411's exclusive monitor is measured by
+  `scripts/hil/m2_nucleo_f411re.py`; the result sets the replay default
+  for STM32F4 recordings.
 
 **Acceptance criteria**
 - 1,000,000 random instruction sequences produce identical registers,

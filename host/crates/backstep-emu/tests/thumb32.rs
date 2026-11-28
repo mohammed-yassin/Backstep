@@ -31,6 +31,7 @@ fn cpu_at(base: u32, code: &[u16]) -> Cpu {
     m.load(4, &(base | 1).to_le_bytes()).unwrap();
     let mut cpu = Cpu::new(m);
     cpu.reset(0).unwrap();
+    cpu.exceptions = false; // these tests check where execution stops
     cpu
 }
 

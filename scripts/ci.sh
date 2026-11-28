@@ -57,10 +57,13 @@ run_firmware() {
         exit 1
     fi
     echo "PASS backstep crc32 == zlib crc32 ($ours)"
-    step "Emulator: random Thumb and Thumb-2 programs, every instruction identical to QEMU"
+    step "Emulator: 1,000,000 instructions of random programs (Thumb, Thumb-2, exceptions) identical to QEMU, registers and memory"
     (cd host && cargo build --locked --release -p backstep-emu)
     python3 scripts/emu-difftest.py --emu host/target/release/backstep-emu-trace \
-        --programs 40 --length 1500 --seed "${EMU_DIFFTEST_SEED:-1}"
+        --programs 460 --length 1500 --seed "${EMU_DIFFTEST_SEED:-1}" --jobs "$(nproc)" \
+        --min-instructions 1000000
+    step "Emulator: decoder and exception model line coverage >= 90%"
+    scripts/emu-coverage.sh --min 90
     step "Hardware test scripts: self-test against a simulated board"
     python3 scripts/hil/test_hil_scripts.py
 }

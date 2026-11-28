@@ -9,11 +9,12 @@
 //! to a [`Bus`] implementation, which during replay answers loads from the
 //! recording.
 //!
-//! Status (milestone M2, part 2): every 16-bit Thumb and 32-bit Thumb-2
-//! integer and DSP instruction of ARMv7E-M, IT blocks, the special
-//! registers (MSR/MRS, PRIMASK, BASEPRI, FAULTMASK, CONTROL, MSP/PSP),
-//! exclusives, and the ELF loader. Exceptions follow in part 3 of M2 and
-//! floating point in M7.
+//! Status (milestone M2): every 16-bit Thumb and 32-bit Thumb-2 integer
+//! and DSP instruction of ARMv7E-M, IT blocks, the special registers
+//! (MSR/MRS, PRIMASK, BASEPRI, FAULTMASK, CONTROL, MSP/PSP), exclusives,
+//! the exception model with the SCB/NVIC registers
+//! ([`cpu::exceptions`]), and the ELF loader. Floating point follows in
+//! M7.
 
 // An instruction-set emulator converts between register widths and
 // signedness constantly, always deliberately; these lints would add noise
@@ -21,7 +22,11 @@
 // Register names (rd, rn, rm) and encoding fields (h, imm) mirror the
 // Architecture Reference Manual on purpose, and instruction groups are
 // kept together in one function each, as the manual's decode tables are.
+// Documentation uses the manual's register and exception names (HardFault,
+// CCR.DIV_0_TRP), and the core state has one flag per architectural bit.
 #![allow(
+    clippy::doc_markdown,
+    clippy::struct_excessive_bools,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     clippy::cast_possible_wrap,
@@ -37,5 +42,6 @@ pub mod cpu;
 pub mod elf;
 pub mod memory;
 
-pub use cpu::{Cpu, Stop};
+pub use cpu::exceptions::{ExceptionStats, Scs};
+pub use cpu::{Cpu, Stop, DEFAULT_IRQS};
 pub use memory::{Bus, Fault, Memory};

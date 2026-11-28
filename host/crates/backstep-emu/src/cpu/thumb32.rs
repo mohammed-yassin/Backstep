@@ -1169,6 +1169,9 @@ impl Cpu {
             if lo != 15 || bad(d) || bad(n) || bad(m) {
                 return undef;
             }
+            if rm == 0 && self.exceptions && self.scs.ccr & super::exceptions::ccr::DIV_0_TRP != 0 {
+                return Err(Stop::DivideByZero { pc });
+            }
             self.r[d] = if rm == 0 {
                 0
             } else if op1 == 1 {
