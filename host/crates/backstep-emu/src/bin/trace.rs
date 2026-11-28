@@ -1,8 +1,9 @@
-//! `backstep-emu-trace <firmware.elf> [max-instructions]`
+//! `backstep-emu-trace <firmware.elf> [max-instructions] [--fpu]`
 //!
 //! Runs a test firmware image on the emulator with the QEMU `mps2-an386`
 //! memory map and prints the register state before every instruction in
-//! exactly the format of `qemu-system-arm -d cpu`, so the two traces can be
+//! exactly the format of `qemu-system-arm -d cpu` (with `--fpu`, of
+//! `-d cpu,fpu`: S0-S31, D0-D15 and FPSCR too), so the two traces can be
 //! compared line by line (`scripts/emu-difftest.py`). Stops at a
 //! semihosting exit (`BKPT 0xAB` with r0 = 0x18). The semihosting calls
 //! `SYS_OPEN`, `SYS_WRITE` and `SYS_CLOSE` write files relative to the
@@ -12,6 +13,7 @@
 use std::process::ExitCode;
 
 use backstep_emu::cpu::exceptions::FAULT_CAUSES;
+use backstep_emu::cpu::vfp::FP_FLAG_NAMES;
 use backstep_emu::elf::Elf;
 use backstep_emu::memory::NoBus;
 use backstep_emu::{Cpu, Memory, Scs, Stop};
@@ -40,9 +42,19 @@ fn print_stats(cpu: &Cpu) {
     for ((name, _), count) in FAULT_CAUSES.iter().zip(s.faults) {
         eprintln!("STAT fault-{name} {count}");
     }
+    let f = &cpu.fp_stats;
+    for (name, count) in FP_FLAG_NAMES.iter().zip(f.flags) {
+        eprintln!("STAT fp-{name} {count}");
+    }
+    for (name, count) in ["rn", "rp", "rm", "rz"].iter().zip(f.rounding) {
+        eprintln!("STAT fp-{name} {count}");
+    }
+    eprintln!("STAT fp-fz {}", f.flush_to_zero);
+    eprintln!("STAT fp-dn {}", f.default_nan);
+    eprintln!("STAT fp-ahp {}", f.alternative_half);
 }
 
-fn print_state(cpu: &Cpu, out: &mut String) {
+fn print_state(cpu: &Cpu, fpu: bool, out: &mut String) {
     use std::fmt::Write;
     let r = &cpu.r;
     for row in 0..4 {
@@ -61,6 +73,19 @@ fn print_state(cpu: &Cpu, out: &mut String) {
         );
     }
     let _ = writeln!(out, "XPSR={:08x}", cpu.xpsr());
+    if fpu {
+        for i in 0..16 {
+            let (lo, hi) = (cpu.s[2 * i], cpu.s[2 * i + 1]);
+            let _ = writeln!(
+                out,
+                "s{:02}={lo:08x} s{:02}={hi:08x} d{i:02}={:016x}",
+                2 * i,
+                2 * i + 1,
+                (u64::from(hi) << 32) | u64::from(lo)
+            );
+        }
+        let _ = writeln!(out, "FPSCR: {:08x}", cpu.fpscr);
+    }
 }
 
 /// Open files of the semihosting calls (handle = index + 1).
@@ -133,9 +158,11 @@ impl Semihosting {
 }
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().collect();
+    let mut args: Vec<String> = std::env::args().collect();
+    let fpu = args.iter().any(|a| a == "--fpu");
+    args.retain(|a| a != "--fpu");
     let Some(path) = args.get(1) else {
-        eprintln!("usage: backstep-emu-trace <firmware.elf> [max-instructions]");
+        eprintln!("usage: backstep-emu-trace <firmware.elf> [max-instructions] [--fpu]");
         return ExitCode::from(2);
     };
     let max: u64 = args
@@ -169,7 +196,7 @@ fn main() -> ExitCode {
     let mut bus = NoBus;
     let mut semihosting = Semihosting::default();
     for _ in 0..max {
-        print_state(&cpu, &mut out);
+        print_state(&cpu, fpu, &mut out);
         match cpu.step(&mut bus) {
             Ok(()) => {}
             Err(Stop::Breakpoint { imm: 0xAB, .. })

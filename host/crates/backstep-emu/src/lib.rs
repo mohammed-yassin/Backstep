@@ -40,6 +40,7 @@
 pub mod alu;
 pub mod cpu;
 pub mod elf;
+pub mod fpu;
 pub mod memory;
 
 pub use cpu::exceptions::{ExceptionStats, Scs};

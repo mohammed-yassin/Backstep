@@ -398,6 +398,19 @@ fn start(elf: &Elf, rec: &Recording, target: &Target) -> Result<Cpu, ReplayError
             .load(region.address, &region.bytes)
             .map_err(|_| ReplayError::Elf(format!("snapshot region {:#010x}", region.address)))?;
     }
+    // The recorder does not save the floating-point registers yet (M7
+    // part 2): with the FPU enabled, replay could not start from the
+    // recorded state, so it refuses instead of guessing.
+    if rec.snapshot.scs.cpacr & (3 << 20) != 0 {
+        return Err(ReplayError::Stopped {
+            instruction: 0,
+            stop: Stop::Unsupported {
+                pc: rec.snapshot.cpu.pc & !1,
+                what: "recording made with the FPU enabled (CPACR): the floating-point \
+                       registers are not recorded yet (M7)",
+            },
+        });
+    }
     let mut cpu = Cpu::new(memory);
     cpu.scs = Scs::new(target.num_irqs);
     cpu.priority_mask = target.priority_mask;

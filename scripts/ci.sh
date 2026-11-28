@@ -64,7 +64,11 @@ run_firmware() {
     python3 scripts/emu-difftest.py --emu host/target/release/backstep-emu-trace \
         --programs 460 --length 1500 --seed "${EMU_DIFFTEST_SEED:-1}" --jobs "$(nproc)" \
         --min-instructions 1000000
-    step "Emulator: decoder and exception model line coverage >= 90%"
+    step "Emulator: 1,000,000 floating-point instructions (FPv4-SP, mixed with integer code and exceptions) identical to QEMU, S0-S31 and FPSCR included"
+    python3 scripts/emu-difftest.py --emu host/target/release/backstep-emu-trace --fpu \
+        --programs 520 --length 4000 --seed "${EMU_DIFFTEST_SEED:-1}" --jobs "$(nproc)" \
+        --min-fp-instructions 1000000
+    step "Emulator: decoder, exception model and floating-point unit line coverage >= 90%"
     scripts/emu-coverage.sh --min 90
     step "Replay: 10 recorded polling programs replayed instruction for instruction vs QEMU; corrupted recordings detected"
     (cd host && cargo build --locked --release -p backstep-cli)

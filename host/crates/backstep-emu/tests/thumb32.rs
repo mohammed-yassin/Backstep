@@ -108,18 +108,6 @@ fn unpredictable_and_undefined_32bit_encodings_stop() {
 }
 
 #[test]
-fn floating_point_is_reported_not_guessed() {
-    let mut cpu = cpu_with(&w(0xEE30_0A00)); // vadd.f32 s0, s0, s0
-    assert_eq!(
-        cpu.step(&mut NoBus),
-        Err(Stop::Unimplemented {
-            pc: CODE,
-            insn: 0xEE30_0A00
-        })
-    );
-}
-
-#[test]
 fn alignment_is_required_where_the_architecture_requires_it() {
     for (insn, what) in [
         (0xE9D2_0100u32, "ldrd r0, r1, [r2]"),

@@ -24,6 +24,19 @@ its format version, and the tools say when they cannot read it).
 - `--json` for both.
 - Example bugs: `demo_stack.c` (a task stack overflow) and `demo_race.c`
   (a lost update), next to `demo_overrun.c`.
+- Emulator: the Cortex-M4 floating-point unit (FPv4-SP). Every
+  single-precision instruction, with all rounding modes, flush-to-zero,
+  default NaN, half-precision conversions and the FPSCR exception flags
+  bit for bit; CPACR access control (NOCP faults), FPCCR, FPDSCR and the
+  floating-point context ([ADR 0012](docs/adr/0012-floating-point.md)).
+  CI compares 1,000,000 floating-point instructions with QEMU.
+
+### Changed
+
+- `backstep replay` refuses a recording made with the FPU enabled, with
+  a message: the recorder does not save the floating-point registers yet
+  (M7 part 2). Exceptions taken with a floating-point context active
+  (extended frames) are not emulated yet either.
 
 ## [0.1.0] - 2026-11-28
 

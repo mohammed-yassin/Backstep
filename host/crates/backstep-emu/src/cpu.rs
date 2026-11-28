@@ -9,6 +9,7 @@ use crate::memory::{Bus, Fault, Memory};
 
 pub mod exceptions;
 mod thumb32;
+pub mod vfp;
 
 use exceptions::{cfsr, ExceptionStats, Scs};
 
@@ -76,6 +77,13 @@ pub enum Stop {
         /// The address accessed.
         address: u32,
     },
+    /// A coprocessor instruction for a coprocessor that is absent (all
+    /// but the FPU's cp10/cp11) or that CPACR disables: a `UsageFault`
+    /// (NOCP) on the real core.
+    NoCoprocessor {
+        /// Address of the instruction.
+        pc: u32,
+    },
     /// SDIV/UDIV by zero with CCR.DIV_0_TRP set.
     DivideByZero {
         /// Address of the instruction.
@@ -107,6 +115,7 @@ fn as_exception(stop: Stop) -> Option<(usize, u32, bool)> {
         Stop::Svc { .. } => Some((SVCALL, 0, true)),
         Stop::Undefined { .. } => Some((USAGE_FAULT, cfsr::UNDEFINSTR, false)),
         Stop::InvalidState { .. } => Some((USAGE_FAULT, cfsr::INVSTATE, false)),
+        Stop::NoCoprocessor { .. } => Some((USAGE_FAULT, cfsr::NOCP, false)),
         Stop::Unaligned { .. } => Some((USAGE_FAULT, cfsr::UNALIGNED, false)),
         Stop::DivideByZero { .. } => Some((USAGE_FAULT, cfsr::DIVBYZERO, false)),
         Stop::BusFault { .. } => Some((BUS_FAULT, 0, false)),
@@ -133,6 +142,11 @@ pub struct Cpu {
     pub basepri: u8,
     /// FAULTMASK.
     pub faultmask: bool,
+    /// The floating-point registers S0-S31 (D0-D15 are pairs of them:
+    /// Dn = S(2n+1):S(2n)).
+    pub s: [u32; 32],
+    /// FPSCR (only the bits FPv4-SP implements, `fpu::fpscr::WRITABLE`).
+    pub fpscr: u32,
     /// CONTROL: bit 0 nPRIV, bit 1 SPSEL, bit 2 FPCA.
     pub control: u32,
     /// The stack pointer not currently in `r[13]` (PSP while MSP is in
@@ -162,6 +176,8 @@ pub struct Cpu {
     pub scs: Scs,
     /// Exception event counters.
     pub stats: ExceptionStats,
+    /// Floating-point behaviour counters.
+    pub fp_stats: vfp::FpStats,
     /// RAM and flash.
     pub memory: Memory,
     /// Instructions executed (including ones skipped by IT).
@@ -207,6 +223,8 @@ impl Cpu {
             ge: 0,
             basepri: 0,
             faultmask: false,
+            s: [0; 32],
+            fpscr: 0,
             control: 0,
             sp_banked: 0,
             monitor: None,
@@ -216,6 +234,7 @@ impl Cpu {
             exceptions: true,
             scs: Scs::new(DEFAULT_IRQS),
             stats: ExceptionStats::default(),
+            fp_stats: vfp::FpStats::default(),
             memory,
             instructions: 0,
             exc_return: None,
@@ -249,6 +268,8 @@ impl Cpu {
         self.ge = 0;
         self.basepri = 0;
         self.faultmask = false;
+        self.s = [0; 32];
+        self.fpscr = 0;
         self.control = 0;
         self.sp_banked = 0;
         self.monitor = None;
