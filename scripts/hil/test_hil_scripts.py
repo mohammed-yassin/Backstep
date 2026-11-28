@@ -22,6 +22,7 @@ HERE = Path(__file__).resolve().parent
 M0 = HERE / "m0_nucleo_f411re.py"
 M1 = HERE / "m1_nucleo_f411re.py"
 M2 = HERE / "m2_nucleo_f411re.py"
+M3 = HERE / "m3_nucleo_f411re.py"
 
 
 def fake_board(master_fd: int, lines: list[str], period_s: float) -> None:
@@ -32,13 +33,13 @@ def fake_board(master_fd: int, lines: list[str], period_s: float) -> None:
 
 
 def run_case(name: str, lines: list[str], period_s: float, led: str, expect_ok: bool,
-             script: Path = M0) -> bool:
+             script: Path = M0, extra: list[str] | None = None) -> bool:
     master, slave = pty.openpty()
     port = os.ttyname(slave)
     feeder = threading.Thread(target=fake_board, args=(master, lines, period_s), daemon=True)
     feeder.start()
     proc = subprocess.run(
-        [sys.executable, str(script), port, "--timeout", "15"],
+        [sys.executable, str(script), port, "--timeout", "15", *(extra or [])],
         input=led + "\n", capture_output=True, text=True, timeout=30,
     )
     os.close(master)
@@ -110,6 +111,37 @@ def main() -> int:
         ("m2: silent board fails", [], 0.05, "", False),
     ]
     results += [run_case(*case, script=M2) for case in m2_cases]
+
+    # M3: the board sends a recording as hex; a stub stands in for
+    # `backstep replay` (its exit status is the replay verdict).
+    import tempfile
+    import zlib
+    with tempfile.TemporaryDirectory() as tmp:
+        stubs = {}
+        for name, code in (("ok", 0), ("diverged", 1)):
+            stub = Path(tmp) / f"backstep-{name}"
+            stub.write_text(f"#!{sys.executable}\nimport sys\nprint('replay: stub')\nsys.exit({code})\n")
+            stub.chmod(0o755)
+            stubs[name] = stub
+        payload = bytes(range(256)) * 3
+        hexed = payload.hex().upper()
+        block = [hexed[i:i + 64] for i in range(0, len(hexed), 64)]
+        m3_good = ["BACKSTEP-M3 NUCLEO-F411RE record and replay test", "PASS recording complete",
+                   f"BSREC BEGIN {len(payload)}", *block, f"BSREC END 0x{zlib.crc32(payload):08X}",
+                   "RESULT PASS"]
+        m3_damaged = [l.replace("00010203", "00010213") for l in m3_good]
+        m3_cut = [l for l in m3_good if not l.startswith("BSREC END")]
+        out = ["--out", str(Path(tmp) / "recording.bsr"), "--elf", "unused.elf"]
+        m3_cases = [
+            ("m3: healthy board and replay passes", m3_good, 0.02, "", True, stubs["ok"]),
+            ("m3: replay divergence fails", m3_good, 0.02, "", False, stubs["diverged"]),
+            ("m3: damaged transfer fails", m3_damaged, 0.02, "", False, stubs["ok"]),
+            ("m3: missing end of block fails", m3_cut, 0.02, "", False, stubs["ok"]),
+            ("m3: silent board fails", [], 0.02, "", False, stubs["ok"]),
+        ]
+        for name, lines, period, led, expect, stub in m3_cases:
+            results.append(run_case(name, lines, period, led, expect, script=M3,
+                                    extra=out + ["--backstep", str(stub)]))
     print(f"hil script self-test: {sum(results)}/{len(results)} cases correct")
     return 0 if all(results) else 1
 

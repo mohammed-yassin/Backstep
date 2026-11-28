@@ -42,6 +42,7 @@ QEMU_REPLAY := $(BUILD)/qemu-mps2-an386/replay_test.elf
 NUCLEO_ELF := $(BUILD)/nucleo-f411re/blinky.elf
 NUCLEO_TRAP := $(BUILD)/nucleo-f411re/mmio_trap_hw.elf
 NUCLEO_EXCL := $(BUILD)/nucleo-f411re/exclusive_hw.elf
+NUCLEO_REC := $(BUILD)/nucleo-f411re/record_hw.elf
 
 TRAP_SRC := $(ROOT)/recorder/src/thumb_ldst.c $(ROOT)/recorder/src/mpu_trap.c
 CMP_MPU  := $(BUILD)/qemu-mps2-an386/capture_compare_mpu.elf
@@ -58,7 +59,8 @@ CLANG_FLAGS := --target=arm-none-eabi -mthumb -mcpu=cortex-m4 -mfloat-abi=soft \
 
 .PHONY: all clean qemu-test cc-test irq-test snapshot-test replay-test
 all: $(QEMU_ELF) $(QEMU_TRAP) $(CMP_MPU) $(QEMU_IRQ) $(QEMU_IRQ0) $(QEMU_SNAP) $(QEMU_REPLAY) $(NUCLEO_ELF) $(NUCLEO_ELF:.elf=.bin) $(NUCLEO_ELF:.elf=.hex) \
-     $(NUCLEO_TRAP) $(NUCLEO_TRAP:.elf=.bin) $(NUCLEO_EXCL) $(NUCLEO_EXCL:.elf=.bin)
+     $(NUCLEO_TRAP) $(NUCLEO_TRAP:.elf=.bin) $(NUCLEO_EXCL) $(NUCLEO_EXCL:.elf=.bin) \
+     $(NUCLEO_REC) $(NUCLEO_REC:.elf=.bin)
 
 $(BUILD)/qemu-mps2-an386/hello.elf: targets/qemu-mps2-an386/hello.c $(COMMON_SRC) targets/qemu-mps2-an386/link.ld common/semihost.h
 	@mkdir -p $(@D)
@@ -151,6 +153,12 @@ $(NUCLEO_EXCL): targets/nucleo-f411re/exclusive_hw.c targets/nucleo-f411re/nucle
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -I targets/nucleo-f411re $(LDFLAGS) -T targets/nucleo-f411re/link.ld \
 	    -Wl,-Map=$(@:.elf=.map) -o $@ targets/nucleo-f411re/exclusive_hw.c $(COMMON_SRC) -lgcc
+	$(SIZE) $@
+
+$(NUCLEO_REC): targets/nucleo-f411re/record_hw.c targets/nucleo-f411re/nucleo_test.h $(COMMON_SRC) $(RECORD_SRC) targets/nucleo-f411re/link.ld common/test_harness.h $(ROOT)/recorder/include/backstep_record.h
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -I targets/nucleo-f411re -I $(ROOT)/recorder/src $(LDFLAGS) -T targets/nucleo-f411re/link.ld \
+	    -Wl,-Map=$(@:.elf=.map) -o $@ targets/nucleo-f411re/record_hw.c $(COMMON_SRC) $(RECORD_SRC) -lgcc
 	$(SIZE) $@
 
 %.bin: %.elf

@@ -11,6 +11,7 @@ Each entry has a script that prints a report block to paste below.
 | M0 | Blinky boots from flash, LED LD2 blinks at 1 Hz, console at 115200 baud, heartbeat period 1.000 s, on-target CRC-32 correct | `scripts/hil/m0_nucleo_f411re.py` | Pending |
 | M1 | MPU trap on real STM32F411 registers: all load forms, stores, interrupts at priority 0x80 and 0, trapped console; cycles per trapped load (DWT) | `scripts/hil/m1_nucleo_f411re.py` | Pending |
 | M2 | Exclusive monitor: LDREX/STREX and CLREX behave as required; measure STREX to another address, of another size, after a plain store and after an exception | `scripts/hil/m2_nucleo_f411re.py` | Pending |
+| M3 | Record polling code reading real STM32F411 registers, send the recording over the UART, replay it on the PC: every load reproduced, end registers and RAM checksum equal | `scripts/hil/m3_nucleo_f411re.py` | Pending |
 
 ## M0: blinky on NUCLEO-F411RE
 
@@ -64,5 +65,25 @@ STM32F4 recordings (M3).
 QEMU's results for reference (STM32F405 model, printed by CI):
 `other_address` fails, `other_size` succeeds, `plain_store` succeeds,
 `exception` fails.
+
+**Report:** _not run yet_
+
+## M3: record on NUCLEO-F411RE, replay on the PC
+
+1. `make -C firmware` and `(cd host && cargo build --release)`
+2. Copy `firmware/build/nucleo-f411re/record_hw.bin` onto the
+   `NODE_F411RE` drive.
+3. `python3 scripts/hil/m3_nucleo_f411re.py <serial-port>`
+4. Press RESET when asked. The board records TIM2 counter, GPIO input,
+   USART status and RCC reads (the timer gives different values every
+   run), then sends the recording as hex. The script saves it as
+   `recording.bsr` and runs `backstep replay`, which must reproduce every
+   load and the end registers and RAM checksum the board recorded. Paste
+   the report block here.
+
+Pressing or holding the blue user button during the run is fine (PC13
+is read and changes the path taken). The same image and script run in
+CI on QEMU's netduinoplus2 (`scripts/qemu-nucleo-replay-smoke.py`).
+This check depends on the MPU trap working on the board (M1 check above).
 
 **Report:** _not run yet_

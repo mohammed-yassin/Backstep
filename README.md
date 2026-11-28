@@ -9,9 +9,10 @@ did on the real chip, then replay that exact execution on your PC and step
 > snapshot, all verified on QEMU. M2 is done too: the replay emulator
 > executes every Thumb and Thumb-2 integer instruction and the whole
 > exception model identically to QEMU, checked over 1,000,000 instructions
-> on every change. In M3 the first recordings replay: polling programs
-> recorded on QEMU are replayed by `backstep replay` instruction for
-> instruction, and corrupted recordings are rejected. See the
+> on every change. M3 is done: polling programs recorded on QEMU (and on
+> the NUCLEO-F411RE image) are replayed by `backstep replay` instruction
+> for instruction, and corrupted recordings are rejected. The board runs
+> are queued for hardware verification. Next is M4, interrupts. See the
 > [roadmap](docs/ROADMAP.md) for what works today and what comes next.
 
 ---
