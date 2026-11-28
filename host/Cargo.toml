@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/backstep-core", "crates/backstep-cli", "crates/backstep-emu", "crates/backstep-gdb", "crates/backstep-replay"]
+members = ["crates/backstep-core", "crates/backstep-cli", "crates/backstep-emu", "crates/backstep-gdb", "crates/backstep-query", "crates/backstep-replay"]
 
 [workspace.package]
 version = "0.1.0"

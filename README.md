@@ -117,6 +117,14 @@ host/target/release/backstep inspect recording.bsr
 host/target/release/backstep replay firmware/build/qemu-mps2-an386/replay_test.elf recording.bsr
 ```
 
+Or ask it who wrote a variable last, and see its interrupts and faults
+([guide](docs/QUERIES.md)):
+
+```bash
+host/target/release/backstep why firmware/build/qemu-mps2-an386/replay_test.elf recording.bsr g_hash
+host/target/release/backstep timeline firmware/build/qemu-mps2-an386/replay_test.elf recording.bsr
+```
+
 Debug the recording with GDB, forwards and backwards
 ([guide](docs/GDB.md)):
 

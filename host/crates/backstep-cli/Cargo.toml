@@ -16,6 +16,8 @@ path = "src/main.rs"
 backstep-core = { path = "../backstep-core" }
 backstep-emu = { path = "../backstep-emu" }
 backstep-gdb = { path = "../backstep-gdb" }
+backstep-query = { path = "../backstep-query" }
+serde_json = "1"
 backstep-replay = { path = "../backstep-replay" }
 clap = { version = "4.5", features = ["derive"] }
 

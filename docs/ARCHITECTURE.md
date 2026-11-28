@@ -59,6 +59,10 @@ keeps it small enough for a microcontroller's RAM.
   [ADR 0009](adr/0009-replaying-interrupts.md)).
 - `backstep-gdb`: the GDB remote protocol server over a replay timeline
   (reverse debugging, [ADR 0010](adr/0010-reverse-debugging.md)).
+- `backstep-query`: questions answered from the replay: who wrote a
+  variable, lost updates, the interrupt and fault timeline; DWARF
+  debug information for variables and source lines
+  ([ADR 0011](adr/0011-queries.md)).
 - `backstep-cli`: the `backstep` command.
 - `unsafe` code is forbidden in the workspace (`unsafe_code = "forbid"`).
 - The emulator is written from scratch so the whole project stays MIT

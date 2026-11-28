@@ -231,7 +231,7 @@ static void round_of_work(uint32_t round)
     if (g_ambiguous != 0u) {
         ambiguous_wait();
     }
-    g_callback();
+    g_callback(); /* WHY-CRASH-CALL: the call through the corrupted pointer */
 }
 
 static uint32_t g_handle;
