@@ -17,7 +17,7 @@ Status legend: **Done** (merged, automated criteria met) ·
 | M2 | Cortex-M4 emulator | Done (hardware measurement pending) |
 | M3 | First recording and replay (no interrupts) | Done (hardware check pending) |
 | M4 | Interrupts and faults | Done (hardware check pending) |
-| M5 | GDB with step-back, v0.1 release | Done (v0.1.0) |
+| M5 | GDB with step-back, v0.1 release | Done (v0.1.0; binaries published when the tag is pushed) |
 | M6 | "Who wrote this?" queries | Planned |
 | M7 | Real-world STM32 firmware (FPU, DMA, HAL) | Planned |
 | M8 | FreeRTOS | Planned |

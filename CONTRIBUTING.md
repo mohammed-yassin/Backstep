@@ -54,4 +54,6 @@ and an entry in `docs/HARDWARE_VERIFICATION.md`.
 3. `.github/workflows/release.yml` builds `backstep` for Linux, macOS (Arm
    and Intel) and Windows, checks each binary reports the tag's version,
    and publishes the release with that changelog section and SHA-256 sums.
+   A pull request that changes the workflow or the changelog runs the same
+   jobs as a dry run (everything but publishing).
 
