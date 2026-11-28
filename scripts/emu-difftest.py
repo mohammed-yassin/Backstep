@@ -1563,11 +1563,14 @@ def main() -> int:
         print(f"emu-difftest: FAIL (only {fp_total} floating-point instructions compared, "
               f"{args.min_fp_instructions} required)")
         return 1
+    if args.fpu:
+        classes = (f"{fp_total} of them floating point, all {len(REQUIRED_FP)} floating-point "
+                   "instruction classes executed (in IT blocks too)")
+    else:
+        classes = f"all {len(required)} instruction classes executed"
+    entries = sum(v for k, v in event_counts.items() if k.startswith("entry"))
     print(f"emu-difftest: PASS ({args.programs} programs, {total} instructions identical to QEMU, "
-          + (f"{fp_total} of them floating point, " if args.fpu else "")
-          + f"all {len(required)} {'floating-point ' if args.fpu else ''}instruction classes executed, "
-          f"{sum(v for k, v in event_counts.items() if k.startswith('entry'))} exceptions taken, "
-          f"all {len(required_events)} kinds of exception event)")
+          f"{classes}, {entries} exceptions taken, all {len(required_events)} kinds of exception event)")
     return 0
 
 
