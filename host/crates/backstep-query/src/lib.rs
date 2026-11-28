@@ -457,17 +457,17 @@ mod tests {
             access(3, false, 0, 6),
             access(4, true, 0, 7),
         ];
-        assert!(lost_updates(&reread).is_empty());
+        assert_eq!(lost_updates(&reread).len(), 0);
         // Main writes without reading first (a plain store, not an update).
         let blind = [access(1, true, 24, 6), access(2, true, 0, 0)];
-        assert!(lost_updates(&blind).is_empty());
+        assert_eq!(lost_updates(&blind).len(), 0);
         // Same context only.
         let alone = [
             access(1, false, 0, 5),
             access(2, true, 0, 6),
             access(3, true, 0, 7),
         ];
-        assert!(lost_updates(&alone).is_empty());
+        assert_eq!(lost_updates(&alone).len(), 0);
     }
 
     #[test]

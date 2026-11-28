@@ -39,7 +39,7 @@ fn why_finds_every_write_and_the_last() {
         w.writes.windows(2).all(|p| p[0].after == p[1].before),
         "the values chain"
     );
-    assert!(w.lost_updates.is_empty());
+    assert_eq!(w.lost_updates.len(), 0);
     assert_eq!(
         last.at.function.as_deref(),
         Some("main"),

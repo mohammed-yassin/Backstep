@@ -99,7 +99,6 @@ dependencies = [
  "backstep-replay",
  "gimli",
  "serde",
- "serde_json",
 ]
 
 [[package]]
