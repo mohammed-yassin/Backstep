@@ -164,13 +164,54 @@ fn a_new_floating_point_context_takes_fpdscr() {
     cpu.scs.fpdscr = 3 << 22;
     run(&mut cpu, 1);
     assert_eq!((cpu.control, cpu.fpscr), (0, 0));
-    // Lazy state preservation pending: not emulated yet.
+}
+
+#[test]
+fn lazy_preservation_writes_the_reserved_space_first() {
+    // LSPACT set: the first FP instruction stores S0-S15 and FPSCR (the
+    // interrupted context's) at FPCAR, then runs on the same registers.
     let mut cpu = cpu_with(&[VADD]);
     cpu.scs.fpccr = fpccr::LSPACT;
+    cpu.scs.fpcar = RAM + 0x200;
+    for (s, v) in cpu.s.iter_mut().zip(0x100..) {
+        *s = v;
+    }
+    cpu.fpscr = 0x10;
+    run(&mut cpu, 1);
+    assert_eq!(cpu.scs.fpccr & fpccr::LSPACT, 0);
+    for i in 0..16 {
+        assert_eq!(cpu.memory.read(RAM + 0x200 + 4 * i, 4), Some(0x100 + i));
+    }
+    assert_eq!(
+        cpu.memory.read(RAM + 0x240, 4),
+        Some(0x10),
+        "FPSCR at +0x40"
+    );
+    assert_eq!(
+        cpu.memory.read(RAM + 0x244, 4),
+        Some(0),
+        "S16 is not stored"
+    );
+    // An unprivileged background context without access (CPACR
+    // privileged-only, FPCCR.USER): not emulated (a NOCP UsageFault).
+    let mut cpu = cpu_with(&[VADD]);
+    cpu.scs.cpacr = 0x0050_0000;
+    cpu.scs.fpccr = fpccr::LSPACT | fpccr::USER;
     assert!(matches!(
         cpu.step(&mut NoBus),
         Err(Stop::Unsupported { .. })
     ));
+}
+
+#[test]
+fn the_floating_point_check_stays_when_the_instruction_faults() {
+    // As in QEMU: a VLDR that faults has still created the context.
+    let mut cpu = cpu_with(&[0xEDD7_1A02]); // vldr s3, [r7, #8]
+    cpu.scs.fpccr = fpccr::ASPEN;
+    cpu.scs.fpdscr = 1 << 24;
+    cpu.r[7] = RAM + 2;
+    assert!(matches!(cpu.step(&mut NoBus), Err(Stop::Unaligned { .. })));
+    assert_eq!((cpu.control & 4, cpu.fpscr), (4, 1 << 24));
 }
 
 #[test]
@@ -302,4 +343,91 @@ fn floating_point_instructions_run_in_it_blocks() {
     run(&mut cpu, 3);
     assert_eq!(cpu.s[0], 0, "both skipped");
     assert_eq!(cpu.r[15], CODE + 10);
+}
+
+/// A core that takes exceptions: thread code at CODE (`svc #0; nop`),
+/// the `SVCall` handler at 0x200 running `handler`, then `bx lr`.
+fn cpu_with_svc_handler(handler: &[u32]) -> Cpu {
+    let mut cpu = cpu_with(&[0xDF00_BF00]); // svc #0; nop
+    let mut code = halfwords(handler);
+    code.push(0x4770); // bx lr
+    let bytes: Vec<u8> = code.iter().flat_map(|h| h.to_le_bytes()).collect();
+    cpu.memory.load(0x200, &bytes).unwrap();
+    cpu.memory.load(4 * 11, &0x201u32.to_le_bytes()).unwrap();
+    cpu.exceptions = true;
+    cpu.scs.fpccr = fpccr::ASPEN | fpccr::LSPEN;
+    cpu.control = 4; // a floating-point context is active
+    for (s, v) in cpu.s.iter_mut().zip(0x100..) {
+        *s = v;
+    }
+    cpu.fpscr = 0x0300_0010; // DN, FZ... and IXC
+    cpu
+}
+
+#[test]
+fn an_exception_with_a_floating_point_context_reserves_an_extended_frame() {
+    let mut cpu = cpu_with_svc_handler(&[VADD]);
+    let sp = cpu.r[13];
+    run(&mut cpu, 1); // svc: entry
+    let frame = sp - 0x68;
+    assert_eq!(cpu.r[13], frame, "26 words");
+    assert_eq!(cpu.r[14], 0xFFFF_FFE9, "EXC_RETURN with FType clear");
+    assert_eq!(cpu.control & 4, 0, "FPCA cleared in the handler");
+    assert_eq!(cpu.scs.fpcar, frame + 0x20);
+    assert_ne!(
+        cpu.scs.fpccr & fpccr::LSPACT,
+        0,
+        "lazy: nothing written yet"
+    );
+    assert_eq!(
+        cpu.scs.fpccr & (fpccr::USER | fpccr::THREAD | fpccr::HFRDY),
+        fpccr::THREAD | fpccr::HFRDY
+    );
+    assert_eq!(cpu.memory.read(frame + 0x20, 4), Some(0), "S0 not stored");
+    // The handler's first FP instruction preserves the thread's state,
+    // and starts a new context from FPDSCR.
+    run(&mut cpu, 1);
+    assert_eq!(cpu.scs.fpccr & fpccr::LSPACT, 0);
+    assert_eq!(cpu.memory.read(frame + 0x20, 4), Some(0x100), "S0");
+    assert_eq!(cpu.memory.read(frame + 0x5C, 4), Some(0x10F), "S15");
+    assert_eq!(cpu.memory.read(frame + 0x60, 4), Some(0x0300_0010), "FPSCR");
+    assert_eq!(cpu.control & 4, 4);
+    assert_ne!(cpu.s[0], 0x100, "the handler changed S0");
+    // Return: S0-S15 and FPSCR come back from the frame, FPCA is set.
+    run(&mut cpu, 1);
+    assert_eq!(cpu.r[13], sp);
+    assert_eq!(cpu.ipsr, 0);
+    assert_eq!(
+        (cpu.s[0], cpu.fpscr, cpu.control & 4),
+        (0x100, 0x0300_0010, 4)
+    );
+}
+
+#[test]
+fn without_lazy_stacking_the_registers_are_stored_at_once() {
+    let mut cpu = cpu_with_svc_handler(&[]);
+    cpu.scs.fpccr = fpccr::ASPEN;
+    let sp = cpu.r[13];
+    run(&mut cpu, 1);
+    let frame = sp - 0x68;
+    assert_eq!(cpu.memory.read(frame + 0x24, 4), Some(0x101), "S1");
+    assert_eq!(cpu.memory.read(frame + 0x60, 4), Some(0x0300_0010));
+    assert_eq!(cpu.scs.fpccr & fpccr::LSPACT, 0);
+    // QEMU clears them (the architecture: UNKNOWN); S16-S31 are kept.
+    assert_eq!((cpu.s[1], cpu.fpscr, cpu.s[16]), (0, 0, 0x110));
+    run(&mut cpu, 1); // bx lr
+    assert_eq!((cpu.s[1], cpu.fpscr), (0x101, 0x0300_0010));
+}
+
+#[test]
+fn a_handler_without_floating_point_returns_lazily() {
+    // LSPACT is still set at the return: the registers were never
+    // touched, so only LSPACT is cleared and the frame is not read.
+    let mut cpu = cpu_with_svc_handler(&[]);
+    let sp = cpu.r[13];
+    run(&mut cpu, 1);
+    cpu.memory.write(sp - 0x68 + 0x20, 4, 0xDEAD).unwrap(); // S0's slot
+    run(&mut cpu, 1);
+    assert_eq!(cpu.scs.fpccr & fpccr::LSPACT, 0);
+    assert_eq!((cpu.s[0], cpu.r[13], cpu.control & 4), (0x100, sp, 4));
 }

@@ -42,6 +42,7 @@ import argparse
 import os
 import random
 import re
+import resource
 import struct
 import subprocess
 import sys
@@ -580,10 +581,13 @@ PEND_ORDER = [16, 17, 18, 19, 20, 21, 22, 23, 15, 14, 2]
 
 
 class Gen3(Gen32):
+
     """Exceptions: vector table, random priorities and enables, triggers
     in thread mode (SVC, PendSV/SysTick/NMI/IRQ pending, faults, masking,
     PSP, misaligned SP) and generated handlers that read their stack frame,
     pend further exceptions and return in several ways."""
+
+    stkalign_always = False
 
     def vectors(self) -> list[str]:
         names = {2: "h_nmi", 3: "h_hardfault", 4: "h_fault", 5: "h_fault", 6: "h_fault",
@@ -618,6 +622,9 @@ class Gen3(Gen32):
         out += self.store("AIRCR", 0x05FA0000 | (r.randrange(8) << 8))
         out += self.store("SHCSR", r.choice([0, 7, r.getrandbits(3)]) << 16)
         ccr = 0x200 if r.random() < 0.7 else 0
+        # Floating-point programs keep STKALIGN (set at reset): an extended
+        # frame must be 8-byte aligned, since FPCAR has no bits 2:0.
+        ccr |= 0x200 if self.stkalign_always else 0
         ccr |= 0x10 if r.random() < 0.5 else 0          # DIV_0_TRP
         ccr |= 0x08 if r.random() < 0.2 else 0          # UNALIGN_TRP
         out += self.store("CCR", ccr)
@@ -821,13 +828,19 @@ def vfp_imm(imm8: int) -> float:
 
 
 class GenFP(Gen3):
+
     """Floating-point instructions (FPv4-SP): all arithmetic, conversions
     (integer, fixed point, half precision), compares, register transfers,
     loads and stores of single and double registers, FPSCR access with
     every rounding mode and FZ/DN/AHP, in IT blocks too; and the faults
     (NOCP with CPACR denying access or another coprocessor, UNDEFINED
-    double precision, UNALIGNED, BusFault). FPCCR.ASPEN is cleared, so the
-    exception frames stay basic (extended frames are the next step)."""
+    double precision, UNALIGNED, BusFault). FPCCR.ASPEN and LSPEN are
+    random (mostly set, as after reset), and handlers use the FPU too, so
+    exceptions push extended frames, lazily or at once, preserve the
+    floating-point state on the handler's first FP instruction, and
+    restore it on return; handlers read and change the frame's FP slots."""
+
+    stkalign_always = True
 
     def sreg(self) -> str:
         return f"s{self.r.randrange(32)}"
@@ -889,8 +902,10 @@ class GenFP(Gen3):
         # with cp10 and cp11 different, or the reserved 0b10, are
         # UNPREDICTABLE, so they are not tested.
         out += self.fp_store("CPACR", r.choice([0x00F00000, 0x00F00000, 0x00500000]))
-        # LSPEN alone does nothing without ASPEN.
-        out += self.fp_store("FPCCR", r.choice([0, 1 << 30]))
+        # ASPEN (automatic FP context, extended frames) and LSPEN (lazy
+        # stacking); both are set after reset.
+        out += self.fp_store("FPCCR", r.choices([0xC0000000, 0x80000000, 0x40000000, 0],
+                                                 weights=[4, 3, 1, 1])[0])
         out += self.fp_store("FPDSCR", r.getrandbits(32))
         out += self.fp_store("FPCAR", r.getrandbits(32))
         return out + ["dsb", "isb"]
@@ -970,6 +985,43 @@ class GenFP(Gen3):
             return f".inst.w 0x{0xEE000B10 | to_core << 20 | x << 21 | d << 16 | rt << 12:08x}"
         return f"{c(r.choice(FP3), cond)}.f32 {sd}, {sn}, {sm}"
 
+    def handler_fp(self) -> list[str]:
+        """Floating-point work in a handler, skipped while CPACR denies
+        access (a NOCP test may be running): the first FP instruction
+        preserves the interrupted context's state lazily."""
+        r = self.r
+        insns = []
+        while len(insns) < self.imm(1, 3):
+            text = self.fp_insn(None)
+            if "8f" not in text and "r0" not in text:   # no literal pool here; r0 is the frame
+                insns.append(text)
+        skip = self.lbl()
+        return ["ldr.w r3, =0xE000ED88", "ldr r3, [r3]", f"cbz r3, {skip}"] + insns + [f"{skip}:"]
+
+    def body(self, n: int, fixed: bool = False) -> list[str]:
+        out = super().body(n, fixed)
+        if self.r.random() < 0.6:
+            # Before or after the body, never inside one of its sequences
+            # (a pend through r4/r5, an SCS read).
+            at = self.r.choice([0, len(out)])
+            out[at:at] = self.handler_fp()
+        return out
+
+    def frame_reads(self) -> list[str]:
+        """Also the floating-point part of an extended frame (EXC_RETURN
+        bit 4 clear): read a slot, or change one the return will load
+        (unless the state was never preserved)."""
+        out = super().frame_reads()
+        r = self.r
+        if r.random() < 0.5:
+            skip = self.lbl()
+            slot = 0x20 + 4 * r.randrange(17)
+            out += ["tst.w lr, #16", f"bne {skip}", f"ldr r1, [r0, #{slot}]"]
+            if r.random() < 0.5:
+                out += [f"eor.w r1, r1, #0x{1 << r.randrange(32):x}", f"str r1, [r0, #{slot}]"]
+            out.append(f"{skip}:")
+        return out
+
     def reglist(self, max_words: int = 32) -> tuple[str, int]:
         """A register list for VLDM/VSTM/VPUSH/VPOP and its size in words."""
         r = self.r
@@ -1007,7 +1059,11 @@ class GenFP(Gen3):
             return [f"{r.choice(['vcmp', 'vcmpe'])}.f32 {self.sreg()}, {self.sreg()}",
                     "vmrs APSR_nzcv, fpscr", f"it {cnd}", self.fp_insn(cnd)]
         if kind == "nocp":  # NOCP: access denied, then restored
-            return ["cpsie f"] + self.fp_store("CPACR", 0) + [self.fp_insn(None)] \
+            # CONTROL.FPCA is cleared first: an exception with an extended
+            # frame to store at once while access is denied is a derived
+            # fault, not emulated.
+            return ["cpsie f", "mrs r4, control", "bic.w r4, r4, #4", "msr control, r4", "isb"] \
+                + self.fp_store("CPACR", 0) + [self.fp_insn(None)] \
                 + self.fp_store("CPACR", 0x00F00000)
         if kind == "nocp-cp":  # NOCP: a coprocessor that does not exist
             cp = r.choice([0, 1, 7, 9, 12, 14, 15])
@@ -1080,7 +1136,8 @@ REQUIRED_FP = {f"{m}.w" for m in [
     "vldmia d", "vstmia d", "vldmia d!", "vstmia d!", "vldmdb d!", "vstmdb d!",
     "vpush", "vpop", "vpush d", "vpop d", "vfp f64 (undefined)", "coprocessor (not cp10/cp11)"]}
 REQUIRED_FP_EVENTS = {"fault-nocp", "fp-ioc", "fp-dzc", "fp-ofc", "fp-ufc", "fp-ixc", "fp-idc",
-                      "fp-rn", "fp-rp", "fp-rm", "fp-rz", "fp-fz", "fp-dn", "fp-ahp"}
+                      "fp-rn", "fp-rp", "fp-rm", "fp-rz", "fp-fz", "fp-dn", "fp-ahp",
+                      "fp-frames", "fp-lazy-saves", "fp-lazy-returns", "fp-restores"}
 
 
 # RAM compared at the end of every program: the data buffer (with the reach
@@ -1409,11 +1466,15 @@ def check_program(n: int, seed_base: int, length: int, emu_path: str, work: Path
     subprocess.run(["arm-none-eabi-ld", "-T", str(work / "link.ld"), "--no-warn-rwx-segments",
                     "-o", str(elf), str(work / f"p{n}.o")], check=True)
     log = work / f"p{n}.qemu.log"
+    # A program that runs away fills the disk with QEMU's log in seconds;
+    # past 1 GiB QEMU is stopped (SIGXFSZ) and the program fails.
+    limit = lambda: resource.setrlimit(resource.RLIMIT_FSIZE, (1 << 30, 1 << 30))
     qemu = subprocess.run(["timeout", "60", "qemu-system-arm", "-machine", "mps2-an386", "-cpu",
                            "cortex-m4", "-nographic", "-monitor", "none", "-serial", "null",
                            "-semihosting-config", "enable=on,target=native",
                            "-accel", "tcg,one-insn-per-tb=on", "-d", "cpu,fpu,exec,nochain" if fpu else "cpu,exec,nochain",
-                           "-D", str(log), "-kernel", str(elf)], capture_output=True, cwd=work)
+                           "-D", str(log), "-kernel", str(elf)], capture_output=True, cwd=work,
+                          preexec_fn=limit)
     fail = f"FAIL program {n} (seed {seed})"
     if qemu.returncode != 0 and not lockup:
         return f"{fail}: QEMU exited with {qemu.returncode}", 0, {}, {}

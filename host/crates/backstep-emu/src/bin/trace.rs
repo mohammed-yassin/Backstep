@@ -36,6 +36,10 @@ fn print_stats(cpu: &Cpu) {
         ("return-handler", s.returns[0]),
         ("return-thread-msp", s.returns[1]),
         ("return-thread-psp", s.returns[2]),
+        ("fp-frames", s.fp_frames),
+        ("fp-lazy-saves", s.fp_lazy_saves),
+        ("fp-lazy-returns", s.fp_lazy_returns),
+        ("fp-restores", s.fp_restores),
     ] {
         eprintln!("STAT {name} {count}");
     }

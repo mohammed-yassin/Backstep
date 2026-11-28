@@ -171,6 +171,16 @@ pub struct ExceptionStats {
     pub returns: [u64; 3],
     /// Faults by cause, in the order of [`FAULT_CAUSES`].
     pub faults: [u64; 7],
+    /// Entries with an extended (floating-point) frame.
+    pub fp_frames: u64,
+    /// Lazy floating-point state preservations (an FP instruction with
+    /// FPCCR.LSPACT set).
+    pub fp_lazy_saves: u64,
+    /// Returns from an extended frame whose FP registers were never
+    /// written (LSPACT still set).
+    pub fp_lazy_returns: u64,
+    /// Returns from an extended frame that loaded the FP registers.
+    pub fp_restores: u64,
 }
 
 /// Fault causes counted in [`ExceptionStats::faults`], with their CFSR bit.
@@ -337,18 +347,19 @@ impl Cpu {
         self.take_exception(bus, target, ret)
     }
 
-    /// Exception entry: `PushStack` and `ExceptionTaken` (B1.5.6).
+    /// Exception entry: `PushStack` and `ExceptionTaken` (B1.5.6). With a
+    /// floating-point context active (CONTROL.FPCA) the frame is the
+    /// extended one: 26 words, S0-S15 at +0x20, FPSCR at +0x60, a reserved
+    /// word at +0x64. With FPCCR.LSPEN the space is only reserved and
+    /// FPCCR records what lazy preservation needs; otherwise the registers
+    /// are stored now and then, as QEMU does, cleared.
     fn take_exception(&mut self, bus: &mut dyn Bus, n: usize, ret: u32) -> Exec {
-        if self.control & 4 != 0 {
-            return Err(unsupported(
-                ret,
-                "exception entry with floating-point context (M7)",
-            ));
-        }
+        let fp = self.control & 4 != 0;
         let use_psp = self.using_psp();
         let sp = self.r[13];
         let realign = self.scs.ccr & ccr::STKALIGN != 0 && sp & 4 != 0;
-        let frame = sp.wrapping_sub(0x20) & !(u32::from(realign) << 2);
+        let size = if fp { 0x68 } else { 0x20 };
+        let frame = sp.wrapping_sub(size) & !(u32::from(realign) << 2);
         let xpsr = (self.xpsr() & !(1 << 9)) | (u32::from(realign) << 9);
         let words = [
             self.r[0], self.r[1], self.r[2], self.r[3], self.r[12], self.r[14], ret, xpsr,
@@ -361,6 +372,9 @@ impl Cpu {
                 return Err(unsupported(ret, "fault while stacking (derived fault)"));
             }
         }
+        if fp {
+            self.stack_fp_state(bus, ret, frame.wrapping_add(0x20))?;
+        }
         let vector_address = (self.scs.vtor & !3).wrapping_add(4 * n as u32);
         let Ok(vector) = self.read(bus, ret, vector_address, 4) else {
             return Err(unsupported(
@@ -370,13 +384,14 @@ impl Cpu {
         };
         let in_handler = self.ipsr != 0;
         self.r[13] = frame;
+        // EXC_RETURN bit 4 (FType) is clear for an extended frame.
         self.r[14] = if in_handler {
             0xFFFF_FFF1
         } else if use_psp {
             0xFFFF_FFFD
         } else {
             0xFFFF_FFF9
-        };
+        } & !(u32::from(fp) << 4);
         if use_psp {
             std::mem::swap(&mut self.r[13], &mut self.sp_banked); // to MSP
         }
@@ -398,17 +413,74 @@ impl Cpu {
         Ok(())
     }
 
+    /// The floating-point part of an extended frame at `area` (the frame
+    /// + 0x20), during exception entry.
+    fn stack_fp_state(&mut self, bus: &mut dyn Bus, ret: u32, area: u32) -> Exec {
+        self.stats.fp_frames += 1;
+        if self.scs.fpccr & vfp::fpccr::LSPEN != 0 {
+            self.update_fpccr(area);
+            return Ok(());
+        }
+        if !self.fp_enabled() {
+            return Err(unsupported(
+                ret,
+                "CPACR forbids stacking the floating-point registers (NOCP on entry)",
+            ));
+        }
+        let words: Vec<u32> = self.s[..16].iter().copied().chain([self.fpscr]).collect();
+        for (i, v) in words.iter().enumerate() {
+            if self
+                .write(bus, ret, area.wrapping_add(4 * i as u32), 4, *v)
+                .is_err()
+            {
+                return Err(unsupported(ret, "fault while stacking (derived fault)"));
+            }
+        }
+        // The architecture leaves S0-S15 and FPSCR UNKNOWN; QEMU clears them.
+        self.s[..16].fill(0);
+        self.fpscr = 0;
+        Ok(())
+    }
+
+    /// `UpdateFPCCR`: remember where lazy preservation must write, and the
+    /// background context's privilege, mode and which faults are ready
+    /// (could preempt it), as QEMU's `v7m_update_fpccr`.
+    fn update_fpccr(&mut self, area: u32) {
+        use vfp::fpccr::{BFRDY, HFRDY, LSPACT, MMRDY, MONRDY, THREAD, UFRDY, USER};
+        let execution = self.execution_priority();
+        let ready = |n: usize, enable: u32| {
+            self.scs.shcsr_enable & enable != 0 && self.group(self.priority(n)) < execution
+        };
+        let bits = [
+            (!self.privileged(), USER),
+            (self.ipsr == 0, THREAD),
+            (execution > -1, HFRDY),
+            (ready(MEM_MANAGE, 1 << 16), MMRDY),
+            (ready(BUS_FAULT, 1 << 17), BFRDY),
+            (ready(USAGE_FAULT, 1 << 18), UFRDY),
+        ];
+        let mut f = self.scs.fpccr & !(USER | THREAD | HFRDY | MMRDY | BFRDY | MONRDY | UFRDY);
+        f |= LSPACT;
+        for (set, bit) in bits {
+            if set {
+                f |= bit;
+            }
+        }
+        // MONRDY: the DebugMonitor is never enabled here (no DEMCR).
+        self.scs.fpccr = f;
+        self.scs.fpcar = area & !7;
+    }
+
     /// Exception return (`ExceptionReturn`, `PopStack`; B1.5.8), after the
     /// instruction that loaded `EXC_RETURN` into the PC. Integrity-check
     /// failures (UsageFault INVPC) are reported as unsupported: they only
     /// happen in broken firmware, and their exact behaviour is part of M4.
     pub(super) fn exception_return(&mut self, bus: &mut dyn Bus, pc: u32, value: u32) -> Exec {
-        if value & 0x0FFF_FFF0 != 0x0FFF_FFF0 {
-            return Err(unsupported(
-                pc,
-                "EXC_RETURN with a floating-point frame (M7) or invalid",
-            ));
+        if value & 0x0FFF_FFE0 != 0x0FFF_FFE0 {
+            return Err(unsupported(pc, "INVPC: invalid EXC_RETURN"));
         }
+        // FType: bit 4 clear means an extended (floating-point) frame.
+        let extended = value & 0x10 == 0;
         let n = self.ipsr as usize;
         if n >= self.scs.exceptions() || !self.scs.active[n] {
             return Err(unsupported(pc, "INVPC: return from an inactive exception"));
@@ -457,8 +529,12 @@ impl Cpu {
                 "INVPC: stacked IPSR does not match EXC_RETURN",
             ));
         }
+        if extended {
+            self.unstack_fp_state(bus, pc, frame.wrapping_add(0x20), to_thread)?;
+        }
         let align = u32::from(psr & (1 << 9) != 0 && self.scs.ccr & ccr::STKALIGN != 0) << 2;
-        let new_sp = frame.wrapping_add(0x20) | align;
+        let size = if extended { 0x68 } else { 0x20 };
+        let new_sp = frame.wrapping_add(size) | align;
         for (reg, v) in [0usize, 1, 2, 3, 12, 14].iter().zip(words) {
             self.r[*reg] = v;
         }
@@ -468,6 +544,7 @@ impl Cpu {
         self.it = (((psr >> 25) & 3) | (((psr >> 10) & 0x3F) << 2)) as u8;
         self.thumb = psr & (1 << 24) != 0;
         self.ipsr = frame_ipsr;
+        self.control = (self.control & !4) | (u32::from(extended) << 2);
         if psp {
             // Back to thread mode on the process stack.
             let msp = self.r[13];
@@ -482,7 +559,40 @@ impl Cpu {
         Ok(())
     }
 
+    /// The floating-point part of an extended frame at `area` during
+    /// exception return: if lazy preservation never happened (LSPACT
+    /// still set), the registers still hold the interrupted context's
+    /// values and only LSPACT is cleared; otherwise they are loaded.
+    fn unstack_fp_state(&mut self, bus: &mut dyn Bus, pc: u32, area: u32, to_thread: bool) -> Exec {
+        use vfp::fpccr::LSPACT;
+        if self.scs.fpccr & LSPACT != 0 {
+            self.scs.fpccr &= !LSPACT;
+            self.stats.fp_lazy_returns += 1;
+            return Ok(());
+        }
+        // The context returned to must have access to the FPU.
+        if !self.cpacr_allows(!to_thread || self.control & 1 == 0) {
+            return Err(unsupported(
+                pc,
+                "CPACR forbids restoring the floating-point registers (NOCP on return)",
+            ));
+        }
+        let mut words = [0u32; 17];
+        for (i, w) in words.iter_mut().enumerate() {
+            match self.read(bus, pc, area.wrapping_add(4 * i as u32), 4) {
+                Ok(v) => *w = v,
+                Err(_) => return Err(unsupported(pc, "fault while unstacking (derived fault)")),
+            }
+        }
+        self.s[..16].copy_from_slice(&words[..16]);
+        self.fpscr = words[16] & crate::fpu::fpscr::WRITABLE;
+        self.stats.fp_restores += 1;
+        Ok(())
+    }
+
     /// Enter exception `n` straight from the return of the previous one.
+    /// The frame stays as it is, floating-point part included; CONTROL.FPCA
+    /// is cleared as on any entry.
     fn tail_chain(&mut self, bus: &mut dyn Bus, pc: u32, n: usize, exc_return: u32) -> Exec {
         let vector_address = (self.scs.vtor & !3).wrapping_add(4 * n as u32);
         let Ok(vector) = self.read(bus, pc, vector_address, 4) else {
@@ -492,6 +602,7 @@ impl Cpu {
             ));
         };
         self.r[14] = exc_return;
+        self.control &= !4;
         self.ipsr = n as u32;
         self.it = 0;
         self.thumb = vector & 1 != 0;

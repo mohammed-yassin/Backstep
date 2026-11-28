@@ -29,14 +29,16 @@ its format version, and the tools say when they cannot read it).
   default NaN, half-precision conversions and the FPSCR exception flags
   bit for bit; CPACR access control (NOCP faults), FPCCR, FPDSCR and the
   floating-point context ([ADR 0012](docs/adr/0012-floating-point.md)).
-  CI compares 1,000,000 floating-point instructions with QEMU.
+  Exceptions with a floating-point context active push extended frames,
+  with lazy state preservation (FPCCR.LSPEN, FPCAR) or at once, and
+  restore them on return. CI compares 1,000,000 floating-point
+  instructions with QEMU.
 
 ### Changed
 
 - `backstep replay` refuses a recording made with the FPU enabled, with
   a message: the recorder does not save the floating-point registers yet
-  (M7 part 2). Exceptions taken with a floating-point context active
-  (extended frames) are not emulated yet either.
+  (next M7 part).
 
 ## [0.1.0] - 2026-11-28
 
