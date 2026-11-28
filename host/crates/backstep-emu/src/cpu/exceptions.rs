@@ -202,6 +202,28 @@ impl Cpu {
         self.scs.pending[n] = true;
     }
 
+    /// Make interrupt `n` pending and take it now, before the next
+    /// instruction, if it can preempt (how replay delivers a recorded
+    /// interrupt at its recorded position). Returns whether `n` was entered.
+    ///
+    /// # Errors
+    /// A [`Stop`] from exception entry (stacking fault, vector read).
+    ///
+    /// # Panics
+    /// If `n` is not an implemented exception number.
+    pub fn interrupt_now(&mut self, bus: &mut dyn Bus, n: usize) -> Result<bool, Stop> {
+        self.set_pending(n);
+        let preempts = self.highest_pending() == Some(n)
+            && self.group(self.priority(n)) < self.execution_priority();
+        if !preempts {
+            self.scs.pending[n] = false;
+            return Ok(false);
+        }
+        let ret = self.r[15];
+        self.take_exception(bus, n, ret)?;
+        Ok(true)
+    }
+
     /// Priority of exception `n` (-3..-1 fixed, else the register value).
     fn priority(&self, n: usize) -> i32 {
         fixed_priority(n).unwrap_or_else(|| i32::from(self.scs.priority[n]))
@@ -216,8 +238,11 @@ impl Cpu {
         }
     }
 
-    /// `ExecutionPriority()` (B1.5.4).
-    pub(super) fn execution_priority(&self) -> i32 {
+    /// `ExecutionPriority()` (B1.5.4): -2 in NMI, -1 in `HardFault` or
+    /// with FAULTMASK, else the most urgent active exception or mask, 256
+    /// when nothing boosts it.
+    #[must_use]
+    pub fn execution_priority(&self) -> i32 {
         let mut highest = 256;
         for n in 1..self.scs.exceptions() {
             if self.scs.active[n] {

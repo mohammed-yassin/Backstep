@@ -20,6 +20,8 @@ static struct {
     uint32_t snap_bytes; /* RAM bytes copied into cfg.ram_buffer */
     uint32_t events;
     uint32_t dropped;
+    uint32_t irq_events;
+    uint32_t irq_dropped;
     uint32_t state;
     uint32_t ok;
 } g_rec BS_STATE;
@@ -39,8 +41,11 @@ static void record_save(const struct bs_cpu_state *cpu)
 
     regions[0].address = (uint32_t)(uintptr_t)g_rec.cfg.ram_start;
     regions[0].length = span(g_rec.cfg.ram_start, g_rec.cfg.ram_end);
-    regions[1].address = cpu->sp;
-    regions[1].length = (uint32_t)(uintptr_t)g_rec.cfg.stack_top - cpu->sp;
+    /* The whole stack area: replay then starts with the same dead stack
+     * too. The part save() is using is stored as the zeros that
+     * bs_snapshot_take() writes there when save() returns. */
+    regions[1].address = (uint32_t)(uintptr_t)g_rec.cfg.stack_bottom;
+    regions[1].length = span(g_rec.cfg.stack_bottom, g_rec.cfg.stack_top);
     bs_snapshot_header_build(&g_rec.snap, cpu, regions, 2u);
     for (r = 0; r < 2u; ++r) {
         const uint8_t *src = (const uint8_t *)(uintptr_t)regions[r].address;
@@ -49,9 +54,13 @@ static void record_save(const struct bs_cpu_state *cpu)
             return;
         }
         for (i = 0; i < regions[r].length; ++i) {
-            g_rec.cfg.ram_buffer[n++] = src[i];
+            uint32_t a = regions[r].address + i;
+            int scratch = a >= cpu->sp - BS_SNAPSHOT_SAVE_BYTES && a < cpu->sp;
+            g_rec.cfg.ram_buffer[n++] = scratch ? 0u : src[i];
         }
     }
+    /* The snapshot's CRC must cover the bytes as stored. */
+    g_rec.snap.regions_crc32 = bs_crc32_update(0u, g_rec.cfg.ram_buffer, n);
     g_rec.snap_bytes = n;
     if (bs_mmio_trap_stats()->loads != 0u) {
         g_rec.ok = 0u; /* nothing may be captured before the snapshot */
@@ -67,9 +76,15 @@ static void record_finish(const struct bs_cpu_state *cpu)
     struct bs_record_end_state *e = &g_rec.end;
 
     bs_mmio_trap_disable();
+    bs_irq_record_stop();
     st = bs_mmio_trap_stats();
     g_rec.events = st->loads - st->dropped;
     g_rec.dropped = st->dropped;
+    {
+        uint32_t n = bs_irq_record_count();
+        g_rec.irq_events = n < g_rec.cfg.irq_capacity ? n : g_rec.cfg.irq_capacity;
+        g_rec.irq_dropped = n - g_rec.irq_events;
+    }
     e->region_count = 2u;
     e->regions[0].address = (uint32_t)(uintptr_t)g_rec.cfg.ram_start;
     e->regions[0].length = span(g_rec.cfg.ram_start, g_rec.cfg.ram_end);
@@ -85,20 +100,47 @@ static void record_finish(const struct bs_cpu_state *cpu)
     }
 }
 
+static uint32_t primask(void)
+{
+    uint32_t v;
+    __asm__ volatile("mrs %0, primask" : "=r"(v));
+    return v;
+}
+
 int bs_record_begin(const struct bs_record_config *cfg)
 {
+    uint32_t masked = primask();
+    int r;
+
+    /* No interrupt may arrive between starting the capture and the
+     * snapshot: it would be recorded before the recording starts. */
+    __asm__ volatile("cpsid i" ::: "memory");
     g_rec.cfg = *cfg;
     g_rec.ok = 1u;
     g_rec.state = REC_NONE;
     if (bs_mmio_trap_enable(cfg->log, cfg->log_capacity) != 0) {
+        if (masked == 0u) {
+            __asm__ volatile("cpsie i" ::: "memory");
+        }
         return -1;
     }
-    /* The recording starts where this returns (with 0). */
-    return bs_snapshot_take(&g_rec.start_cpu, record_save);
+    /* Always started, also without a log: an interrupt entering through a
+     * stub then marks the recording as having dropped events. */
+    bs_irq_record_start(cfg->irq_log, cfg->irq_capacity, &bs_mmio_trap_stats()->loads,
+                        cfg->stack_top);
+    /* The recording starts where this returns (with 0), still masked;
+     * the caller's PRIMASK comes back below, in the recorded stretch. */
+    r = bs_snapshot_take(&g_rec.start_cpu, record_save);
+    if (masked == 0u) {
+        __asm__ volatile("cpsie i" ::: "memory");
+    }
+    return r;
 }
 
 void bs_record_end(void)
 {
+    /* Interrupts after this point would be recorded but never replayed. */
+    __asm__ volatile("cpsid i" ::: "memory");
     /* Replay stops at the entry of this bs_snapshot_take() call. The CPU
      * state is in g_rec.end.cpu, which is already in .backstep. */
     (void)bs_snapshot_take(&g_rec.end.cpu, record_finish);
@@ -142,7 +184,8 @@ uint32_t bs_record_write(void (*put)(const void *data, uint32_t len, void *ctx),
     uint32_t header[4], target[4], mmio[2];
     uint32_t image_len = span(g_rec.cfg.image_start, g_rec.cfg.image_end);
 
-    if (g_rec.state != REC_DONE || g_rec.ok == 0u || g_rec.dropped != 0u) {
+    if (g_rec.state != REC_DONE || g_rec.ok == 0u || g_rec.dropped != 0u ||
+        g_rec.irq_dropped != 0u) {
         return 0u;
     }
     w.put = put;
@@ -152,7 +195,7 @@ uint32_t bs_record_write(void (*put)(const void *data, uint32_t len, void *ctx),
     header[0] = BS_REC_MAGIC;
     header[1] = BS_REC_VERSION;
     header[2] = sizeof header;
-    header[3] = 4u; /* chunks */
+    header[3] = 5u; /* chunks */
     emit(&w, header, sizeof header);
     target[0] = g_rec.cfg.target_id;
     target[1] = bs_crc32(g_rec.cfg.image_start, image_len);
@@ -165,6 +208,14 @@ uint32_t bs_record_write(void (*put)(const void *data, uint32_t len, void *ctx),
     mmio[1] = g_rec.dropped;
     chunk(&w, BS_REC_CHUNK_MMIO, mmio, sizeof mmio, g_rec.cfg.log,
           g_rec.events * (uint32_t)sizeof(struct bs_mmio_event));
+    {
+        uint32_t irqs[3];
+        irqs[0] = g_rec.irq_events;
+        irqs[1] = g_rec.irq_dropped;
+        irqs[2] = (uint32_t)(uintptr_t)g_rec.cfg.stack_top;
+        chunk(&w, BS_REC_CHUNK_IRQS, irqs, sizeof irqs, g_rec.cfg.irq_log,
+              g_rec.irq_events * (uint32_t)sizeof(struct bs_irq_event));
+    }
     chunk(&w, BS_REC_CHUNK_END, &g_rec.end, sizeof g_rec.end, 0, 0u);
     {
         uint32_t crc = w.file_crc;

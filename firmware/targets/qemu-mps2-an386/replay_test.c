@@ -272,10 +272,13 @@ int main(void)
     cfg.ram_start = &_sdata;
     cfg.ram_end = &_ebss;
     cfg.stack_top = &_estack;
+    cfg.stack_bottom = (const void *)((uintptr_t)&_estack - 8192u); /* the stack area */
     cfg.log = g_log;
     cfg.log_capacity = 4096u;
     cfg.ram_buffer = g_ram;
     cfg.ram_buffer_capacity = sizeof g_ram;
+    cfg.irq_log = 0; /* polling only */
+    cfg.irq_capacity = 0u;
 
     if (bs_record_begin(&cfg) != 0) {
         test_check(0, "MPU present");

@@ -89,6 +89,7 @@ fn inspect(path: &PathBuf) -> Result<ExitCode, ExitCode> {
         );
     }
     println!("  peripheral loads {}", rec.events.len());
+    println!("  interrupts      {}", rec.irqs.len());
     println!(
         "  end             lr {:#010x}, sp {:#010x}, RAM CRC-32 {:08X}",
         rec.end.cpu.lr, rec.end.cpu.sp, rec.end.ram_crc32
@@ -124,8 +125,12 @@ fn replay(
     match backstep_replay::replay(&elf, &rec, opts) {
         Ok(report) => {
             println!(
-                "replay: {} instructions on {}, {} peripheral loads replayed, {} stores",
-                report.instructions, report.target.name, report.loads, report.stores
+                "replay: {} instructions on {}, {} peripheral loads and {} interrupts replayed, {} stores",
+                report.instructions,
+                report.target.name,
+                report.loads,
+                report.interrupts,
+                report.stores
             );
             println!(
                 "replay: end state matches the recording (registers, RAM CRC-32 {:08X})",

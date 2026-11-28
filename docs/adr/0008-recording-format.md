@@ -1,6 +1,7 @@
 # ADR 0008: The recording file and how replay checks it
 
-**Status:** Accepted (M3)
+**Status:** Accepted (M3); version 2 adds interrupts (M4,
+[ADR 0009](0009-replaying-interrupts.md))
 
 ## Context
 
@@ -15,10 +16,15 @@ replayed into a plausible-looking false history.
 **What is recorded** (`recorder/include/backstep_record.h`):
 
 - `bs_record_begin()` turns on peripheral-read capture (the MPU trap,
-  ADR 0003) and takes the starting-state snapshot (ADR 0005). The
-  recording starts where it returns.
+  ADR 0003) and interrupt-position recording (ADR 0004), and takes the
+  starting-state snapshot (ADR 0005), with interrupts masked throughout.
+  The recording starts where it returns. The snapshot holds the program's
+  static RAM and its whole stack area, `[stack_bottom, stack_top)`; the
+  bytes the snapshot code itself is using below SP are stored as the zeros
+  it leaves there.
 - Every peripheral load in between is logged: address, size, value, and
-  the address of the load instruction.
+  the address of the load instruction. So is every interrupt entered
+  through a `BS_IRQ_STUB`, with its position (ADR 0004).
 - `bs_record_end()` captures the end state with a second
   `bs_snapshot_take()`. Its `save` callback runs below the caller's stack,
   turns capture off and computes a CRC-32 of the program's static RAM and
@@ -36,13 +42,16 @@ replayed into a plausible-looking false history.
 **The file** (little-endian `u32`s):
 
 ```text
-header   "BSRC", version 1, header size 16, chunk count 4
+header   "BSRC", version 2, header size 16, chunk count 5
 chunk    type (4 ASCII bytes), payload length, payload, CRC-32 of the payload
   TGTD   target id, CRC-32 of the firmware image, image start, image length
   SNAP   the snapshot exactly as ADR 0005 defines it (header with its own
          region CRC, then the RAM bytes)
   MMIO   load count, dropped count, then 16 bytes per load
          (address, value, pc, size)
+  IRQS   event count, dropped count, stack top (the limit of the stack
+         hash), then 80 bytes per interrupt (struct bs_irq_event:
+         exception number, r0-r12, SP, LR, PC, xPSR, read count, hash)
   END    end registers (struct bs_cpu_state), RAM CRC-32, region count,
          the regions checksummed
 trailer  CRC-32 of every byte before it
@@ -51,19 +60,21 @@ trailer  CRC-32 of every byte before it
 The firmware image is the flash contents from the vector table to the
 end of the `.data` initialisers (`__backstep_image_start/end`, from the
 linker scripts). Replay computes the same CRC from the ELF. Chunks are
-fixed in number and order in version 1; later versions (M4: interrupt
-positions) add chunk types and bump the version.
+fixed in number and order for a version. Version 1 (M3) has no IRQS
+chunk; replay still reads it, as a recording without interrupts.
 
 **The self-check** has two layers:
 
 1. *Integrity.* The trailer and per-chunk CRCs detect any change to the
    bytes of the file, and so does the snapshot's own region CRC. So does
    any truncation, extension, wrong magic or version, and a recorder that
-   dropped loads (`dropped != 0`). `backstep inspect` checks this layer
-   only.
+   dropped loads or interrupts (`dropped != 0`). `backstep inspect` checks
+   this layer only.
 2. *Consistency.* During replay every peripheral load must be the next
-   recorded one: the same instruction, address and size. When replay
-   reaches the end point, every recorded load must have been used, the
+   recorded one: the same instruction, address and size. Every recorded
+   interrupt must be taken when its position is reached. When replay
+   reaches the end point, every recorded load and interrupt must have been
+   used, the
    registers the recorder captures must match, and so must the RAM
    CRC-32. Then come r4-r11, SP, LR, the flags and GE, MSP, PSP, PRIMASK,
    BASEPRI, FAULTMASK and CONTROL. The firmware CRC and the target must
@@ -78,10 +89,11 @@ replay, so layer 2 cannot see them; layer 1 catches them.
 instruction and the access), 2 unusable input (corrupted file, other
 firmware, unknown target).
 
-**Limits (M3):** no interrupts during a recording (M4 adds the interrupt
-log of ADR 0004). Loads from the Private Peripheral Bus (SysTick, DWT)
-are not captured, so replay stops at them and says so. The MPU is not
-modelled in replay; the recording's MPU state is the capture's own.
+**Limits:** Loads from the Private Peripheral Bus (SysTick, DWT) are not
+captured, so replay stops at them and says so; so are peripheral loads at
+priority -1 or -2, which the MPU does not trap. The MPU is not modelled
+in replay; the recording's MPU state is the capture's own. Interrupts:
+see ADR 0009.
 
 ## Verification
 
@@ -126,5 +138,6 @@ Writing the tests found four problems, all fixed:
   registers and RAM CRC must equal the recorded ones. In CI the image runs
   on QEMU's netduinoplus2, and the replay must also equal QEMU's trace
   instruction for instruction (`scripts/qemu-nucleo-replay-smoke.py`).
-- M4 adds the interrupt log and replays interrupts with
-  `Cpu::set_pending` at the recorded positions.
+- M4 adds the interrupt log and replays interrupts at the recorded
+  positions; see [ADR 0009](0009-replaying-interrupts.md), which also
+  explains why the snapshot holds the whole stack area.

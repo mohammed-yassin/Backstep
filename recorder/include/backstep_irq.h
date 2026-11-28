@@ -41,16 +41,26 @@ struct bs_irq_event {
  * iterations apart (docs/adr/0004-interrupt-position.md). */
 #define BS_STACK_HASH_BYTES 128u
 
+/* Dead stack below the stub's SP that the stub zeroes after
+ * bs_irq_record() returns: at least the stack bs_irq_record() and
+ * bs_stack_hash() use (80 bytes at -O0 with GCC; checked by
+ * scripts/check-stack-usage.py). The stub stores 8 x 16 bytes. */
+#define BS_IRQ_STUB_SCRATCH_BYTES 128u
+
 /* FNV-1a over 32-bit words; the replay engine computes the same. */
 uint32_t bs_stack_hash(const uint32_t *words, uint32_t count);
 
-/* Start recording into log[0..capacity-1]. mmio_counter points at the
+/* Start recording into log[0..capacity-1] (log may be 0: events are then
+ * only counted, as are events beyond the capacity). mmio_counter points at the
  * running count of captured peripheral reads (e.g. the MPU trap's);
  * stack_top is the initial main stack pointer (end of the stack). */
 void bs_irq_record_start(struct bs_irq_event *log, uint32_t capacity,
                          const volatile uint32_t *mmio_counter,
                          const void *stack_top);
 uint32_t bs_irq_record_count(void);
+
+/* Stop recording (later interrupts are neither logged nor counted). */
+void bs_irq_record_stop(void);
 
 /* Called by the stubs; not for direct use. */
 void bs_irq_record(const uint32_t *callee_r4_r11, const uint32_t *frame,
@@ -59,8 +69,12 @@ void bs_irq_record(const uint32_t *callee_r4_r11, const uint32_t *frame,
 /*
  * Naked entry stub: masks interrupts at its very first instruction, saves
  * r4-r11 (the hardware already stacked r0-r3, r12, lr, pc, xpsr), records
- * the context, restores everything, unmasks, and tail-branches to the real
- * handler with the original EXC_RETURN in lr.
+ * the context, restores r4-r11 and lr, unmasks, and tail-branches to the
+ * real handler with the original EXC_RETURN in lr. The handler starts with
+ * r0-r3, r12 and the APSR flags zero (they are scratch at a handler's
+ * entry), and the 256 bytes of dead stack bs_irq_record() used are zeroed,
+ * so neither registers nor memory depend on what the recorder computed:
+ * replay, which runs the same stub without recording, sees the same state.
  *
  * A higher-priority interrupt can still arrive before that first
  * instruction; bs_irq_record() detects this case (the inner event resumes
@@ -80,6 +94,23 @@ void bs_irq_record(const uint32_t *callee_r4_r11, const uint32_t *frame,
                          "movw r3, #:lower16:" #stub "\n\t"                  \
                          "movt r3, #:upper16:" #stub "\n\t"                  \
                          "bl bs_irq_record\n\t"                              \
+                         /* zero BS_IRQ_STUB_SCRATCH_BYTES below SP, what */ \
+                         /* bs_irq_record used, and the scratch registers */ \
+                         "mov r3, sp\n\t"                                    \
+                         "mov.w r0, #0\n\t"                                  \
+                         "mov.w r1, #0\n\t"                                  \
+                         "mov.w r2, #0\n\t"                                  \
+                         "mov.w r12, #0\n\t"                                 \
+                         "stmdb r3!, {r0-r2, r12}\n\t"                       \
+                         "stmdb r3!, {r0-r2, r12}\n\t"                       \
+                         "stmdb r3!, {r0-r2, r12}\n\t"                       \
+                         "stmdb r3!, {r0-r2, r12}\n\t"                       \
+                         "stmdb r3!, {r0-r2, r12}\n\t"                       \
+                         "stmdb r3!, {r0-r2, r12}\n\t"                       \
+                         "stmdb r3!, {r0-r2, r12}\n\t"                       \
+                         "stmdb r3!, {r0-r2, r12}\n\t"                       \
+                         "mov.w r3, #0\n\t"                                  \
+                         "msr apsr_nzcvqg, r0\n\t"                           \
                          "add sp, #4\n\t"                                    \
                          "pop {r4-r11, lr}\n\t"                              \
                          "cpsie i\n\t"                                       \

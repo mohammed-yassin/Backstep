@@ -55,7 +55,8 @@ keeps it small enough for a microcontroller's RAM.
 - `backstep-emu`: the Cortex-M4 emulator ([ADR 0006](adr/0006-emulator.md),
   exceptions in [ADR 0007](adr/0007-exceptions.md)).
 - `backstep-replay`: the recording format and the replay engine
-  ([ADR 0008](adr/0008-recording-format.md)).
+  ([ADR 0008](adr/0008-recording-format.md); interrupts and faults in
+  [ADR 0009](adr/0009-replaying-interrupts.md)).
 - `backstep-cli`: the `backstep` command.
 - `unsafe` code is forbidden in the workspace (`unsafe_code = "forbid"`).
 - The emulator is written from scratch so the whole project stays MIT
@@ -67,7 +68,7 @@ keeps it small enough for a microcontroller's RAM.
 Replay is only useful if it is exact. Backstep defends this in three ways:
 
 1. **Differential testing** against QEMU, instruction by instruction
-   (M2, M3).
+   (M2, M3, M4).
 2. **State checksums in the recording.** The recorder periodically logs a
    CRC-32 of CPU registers (and, at checkpoints, memory). The replay
    recomputes them; on the first mismatch it stops and reports where the

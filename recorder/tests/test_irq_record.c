@@ -140,6 +140,26 @@ static void test_capacity(void)
     EXPECT(small[0].pc == 0x08001234u, "first event kept");
 }
 
+static void test_without_log_and_after_stop(void)
+{
+    reset();
+    /* Without a log, events are only counted (the recording then reports
+     * them as dropped instead of missing them). */
+    bs_irq_record_start(0, 4, &g_reads, &g_stack[8 + 64]);
+    bs_irq_record(g_callee, g_stack, 15u, 0x2001u);
+    bs_irq_record(g_callee, g_stack, 15u, 0x2001u);
+    EXPECT(bs_irq_record_count() == 2u, "counted without a log");
+    /* After stop nothing is counted or written. */
+    bs_irq_record_start(g_log, 4, &g_reads, &g_stack[8 + 64]);
+    bs_irq_record(g_callee, g_stack, 15u, 0x2001u);
+    bs_irq_record_stop();
+    g_stack[6] = 0x08005555u;
+    bs_irq_record(g_callee, g_stack, 15u, 0x2001u);
+    EXPECT(bs_irq_record_count() == 1u, "not counted after stop");
+    EXPECT(g_log[1].pc == 0u, "not written after stop");
+    EXPECT(g_log[0].pc == 0x08001234u, "the event before stop is kept");
+}
+
 static void test_hash_known_value(void)
 {
     static const uint32_t words[2] = {0x00000000u, 0xFFFFFFFFu};
@@ -158,6 +178,7 @@ int main(void)
     test_stack_top_clamps_hash();
     test_preempted_at_stub_entry();
     test_capacity();
+    test_without_log_and_after_stop();
     test_hash_known_value();
     printf("irq_record tests: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

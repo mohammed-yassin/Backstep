@@ -13,9 +13,13 @@
  * RAM checksum) that replay must reproduce. The file format is described in
  * docs/adr/0008-recording-format.md.
  *
- * Rules for the recorded code: no interrupts (M4), no MPU use (the capture
- * owns it), and nothing between bs_record_begin() returning and
- * bs_record_end() may read Backstep's own memory (.backstep section).
+ * Rules for the recorded code: interrupts must enter through BS_IRQ_STUB
+ * (backstep_irq.h) so their positions are recorded; no MPU use (the capture
+ * owns it); nothing between bs_record_begin() returning and bs_record_end()
+ * may read Backstep's own memory (.backstep section). Software-pended
+ * exceptions (PendSV) and SVC are reproduced by replay itself and need no
+ * stub. Interrupts are masked inside bs_record_begin/end so that every
+ * recorded interrupt lies between the two.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -24,6 +28,7 @@
 
 #include <stdint.h>
 
+#include "backstep_irq.h"
 #include "backstep_mmio.h"
 #include "backstep_snapshot.h"
 
@@ -32,12 +37,13 @@ extern "C" {
 #endif
 
 #define BS_REC_MAGIC 0x43525342u /* "BSRC" little-endian */
-#define BS_REC_VERSION 1u
+#define BS_REC_VERSION 2u /* 2: adds the IRQS chunk (M4) */
 
 /* Chunk types: four ASCII characters, little-endian. */
 #define BS_REC_CHUNK_TARGET 0x44544754u /* "TGTD" */
 #define BS_REC_CHUNK_SNAPSHOT 0x50414E53u /* "SNAP" */
 #define BS_REC_CHUNK_MMIO 0x4F494D4Du   /* "MMIO" */
+#define BS_REC_CHUNK_IRQS 0x53515249u   /* "IRQS" */
 #define BS_REC_CHUNK_END 0x20444E45u    /* "END " */
 
 /* Target identifiers (the replay tool's memory map and core options). */
@@ -50,15 +56,21 @@ struct bs_record_config {
      * initialisers); its CRC-32 identifies the build. */
     const void *image_start;
     const void *image_end;
-    /* The program's static RAM ([_sdata, _ebss)) and the top of its stack. */
+    /* The program's static RAM ([_sdata, _ebss)) and its stack area. The
+     * whole stack area, dead part included, goes into the snapshot. */
     const void *ram_start;
     const void *ram_end;
+    const void *stack_bottom;
     const void *stack_top;
     /* Working memory, in the .backstep section. */
     struct bs_mmio_event *log;
     uint32_t log_capacity;
     uint8_t *ram_buffer; /* copy of the RAM at the snapshot */
     uint32_t ram_buffer_capacity;
+    /* Interrupt positions (ADR 0004): one event per interrupt entered
+     * through a BS_IRQ_STUB. May be 0 for programs without interrupts. */
+    struct bs_irq_event *irq_log;
+    uint32_t irq_capacity;
 };
 
 /* Payload of the "END " chunk. Field order is part of the file format. */

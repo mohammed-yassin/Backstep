@@ -12,6 +12,7 @@ static uint32_t s_capacity BS_STATE;
 static volatile uint32_t s_count BS_STATE;
 static const volatile uint32_t *s_mmio BS_STATE;
 static const uint32_t *s_stack_top BS_STATE;
+static uint32_t s_active BS_STATE;
 
 uint32_t bs_stack_hash(const uint32_t *words, uint32_t count)
 {
@@ -28,14 +29,20 @@ void bs_irq_record_start(struct bs_irq_event *log, uint32_t capacity,
 {
     s_stack_top = (const uint32_t *)stack_top;
     s_log = log;
-    s_capacity = capacity;
+    s_capacity = log != 0 ? capacity : 0u;
     s_mmio = mmio_counter;
     s_count = 0u;
+    s_active = 1u;
 }
 
 uint32_t bs_irq_record_count(void)
 {
     return s_count;
+}
+
+void bs_irq_record_stop(void)
+{
+    s_active = 0u;
 }
 
 void bs_irq_record(const uint32_t *callee, const uint32_t *frame, uint32_t ipsr,
@@ -44,10 +51,12 @@ void bs_irq_record(const uint32_t *callee, const uint32_t *frame, uint32_t ipsr,
     struct bs_irq_event *e;
     uint32_t n = s_count, i, xpsr, mmio;
 
-    if (s_log == 0) {
+    if (s_active == 0u) {
         return;
     }
-    /* Interrupts are masked (the stub's first instruction did it). */
+    /* Interrupts are masked (the stub's first instruction did it). Events
+     * beyond the capacity (all of them, without a log) are counted only,
+     * which makes the recording unusable rather than wrong. */
     s_count = n + 1u;
     if (n >= s_capacity) {
         return;
